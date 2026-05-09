@@ -1,0 +1,308 @@
+{
+  "info": {
+    "_postman_id": "2e66335d-a824-4d3e-86a9-0d89349c0f4a",
+    "name": "Draftly Phase2 Local",
+    "description": "Postman collection for the Draftly system. Includes Auth, Gmail Connection, Syncing, and AI Workflow (Phase 6).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "gmailAuthUrl",
+      "value": ""
+    },
+    {
+      "key": "threadId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Ping",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/admin/ping"
+          }
+        },
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/admin/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const data = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', data.accessToken || '');",
+                  "  pm.collectionVariables.set('refreshToken', data.refreshToken || '');",
+                  "  pm.collectionVariables.set('userId', data.user?.id || '');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test.user@example.com\",\n  \"name\": \"Test User\",\n  \"password\": \"Password@123\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/register"
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', data.accessToken || '');",
+                  "  pm.collectionVariables.set('refreshToken', data.refreshToken || '');",
+                  "  pm.collectionVariables.set('userId', data.user?.id || '');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test.user@example.com\",\n  \"password\": \"Password@123\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/login"
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/auth/me"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Connections",
+      "item": [
+        {
+          "name": "List Connectors",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections"
+          }
+        },
+        {
+          "name": "Initiate Gmail Connect",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.collectionVariables.set('gmailAuthUrl', data.authUrl || '');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/connect/gmail"
+          }
+        },
+        {
+          "name": "Manual Gmail Sync",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"maxResults\": 10\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/connections/gmail/sync"
+          }
+        },
+        {
+          "name": "List Synced Threads",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  if (data.threads && data.threads.length > 0) {",
+                  "    pm.collectionVariables.set('threadId', data.threads[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/connections/gmail/threads?limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "connections", "gmail", "threads"],
+              "query": [{ "key": "limit", "value": "10" }]
+            }
+          }
+        },
+        {
+          "name": "Disconnect Gmail",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Viewing Results",
+      "item": [
+        {
+          "name": "Get Thread Detail",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}"
+          }
+        },
+        {
+          "name": "Get Triage Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/triage"
+          }
+        },
+        {
+          "name": "Get Latest Draft",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/draft"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Workflow Actions",
+      "item": [
+        {
+          "name": "Trigger Manual Draft",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/draft"
+          }
+        },
+        {
+          "name": "Edit Draft",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Hi,\\n\\nThank you for your email. I will get back to you shortly.\\n\\nBest regards\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/draft"
+          }
+        },
+        {
+          "name": "Approve & Send",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/approve"
+          }
+        },
+        {
+          "name": "Reject Draft",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": "{{baseUrl}}/api/v1/connections/gmail/threads/{{threadId}}/reject"
+          }
+        }
+      ]
+    }
+  ]
+}

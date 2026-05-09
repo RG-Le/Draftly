@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude
+
+# Build output
+dist/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.example
+
+# Keys (generated, not committed)
+keys/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Test
+coverage/
+.pytest_cache/
+htmlcov/
+
+# Misc
+*.bak
+*.tmp

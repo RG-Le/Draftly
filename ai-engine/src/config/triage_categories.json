@@ -1,0 +1,20 @@
+{
+  "categories": [
+    {
+      "id": "reply_needed",
+      "label": "Reply Needed",
+      "description": "The email expects a response or action from the user (e.g., questions, meeting requests, action items, direct conversations)."
+    },
+    {
+      "id": "promotions",
+      "label": "Promotions",
+      "description": "Marketing emails, deals, newsletters, offers, or broadcast content from companies or services."
+    },
+    {
+      "id": "info",
+      "label": "Info (FYI)",
+      "description": "Informational notifications, receipts, shipping updates, order confirmations, automated alerts, system notifications — no response needed."
+    }
+  ],
+  "default_fallback": "info"
+}
