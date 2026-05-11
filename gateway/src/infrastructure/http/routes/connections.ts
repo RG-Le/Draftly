@@ -13,8 +13,15 @@ import { userRateLimitMiddleware } from '../middleware/rate-limiter.js';
 import { ipRateLimitMiddleware } from '../middleware/rate-limiter.js';
 import { ValidationError, NotFoundError, ExternalServiceError } from '../../../domain/errors/index.js';
 import { logger } from '../../../shared/logger.js';
+import { emitToUser } from '../../socket/websocket.js';
 
 export const connectionsRouter = Router();
+
+const DEFAULT_PROFILE_TEXT =
+  'Write professionally and clearly. Keep responses concise — get to the point without unnecessary filler. ' +
+  'Acknowledge the sender\'s context before replying. Use a warm but formal tone that feels approachable, not stiff. ' +
+  'When making requests, be direct and polite. Structure complex points in short paragraphs; ' +
+  'use bullets only when listing multiple distinct items.';
 
 const config = loadConfig();
 
@@ -214,6 +221,44 @@ connectionsRouter.get('/callback', ipRateLimitMiddleware, async (req: Request, r
       { userId, connectionId: connection.id, grantedScopes },
       'Gmail connection established with verified scopes',
     );
+
+    // Bootstrap user profile with defaults on first Gmail connection
+    const user = await db('users').where({ id: userId }).first();
+    const userName = user?.name || 'User';
+    const sigTemplate = `--\n${userName}`;
+
+    const existingProfile = await db('user_profiles').where({ user_id: userId }).first();
+    if (!existingProfile) {
+      await db('user_profiles').insert({
+        user_id: userId,
+        preferred_tone: 'professional',
+        personalized_profile: DEFAULT_PROFILE_TEXT,
+        signature_template: sigTemplate,
+        greeting_style: JSON.stringify({ formal: true, common_phrases: ['Hello', 'Hi'] }),
+        closing_style: JSON.stringify({ formal: true, common_phrases: ['Best regards', 'Thanks'] }),
+        communication_norms: JSON.stringify({ sentence_length: 'medium', uses_bullet_points: false }),
+        confidence_score: 0.5,
+        profile_version: 1,
+      });
+    } else {
+      const updates: Record<string, unknown> = {};
+      if (!existingProfile.preferred_tone) updates.preferred_tone = 'professional';
+      if (!existingProfile.personalized_profile) updates.personalized_profile = DEFAULT_PROFILE_TEXT;
+      if (!existingProfile.signature_template) updates.signature_template = sigTemplate;
+      if (Object.keys(updates).length > 0) {
+        updates.updated_at = new Date();
+        await db('user_profiles').where({ user_id: userId }).update(updates);
+      }
+    }
+
+    emitToUser(userId, 'profile:initialized', {
+      userId,
+      preferredTone: 'professional',
+      signatureTemplate: sigTemplate,
+      personalizedProfile: DEFAULT_PROFILE_TEXT,
+    });
+
+    logger.info({ userId }, 'Profile bootstrap complete after Gmail connection');
 
     // Trigger initial sync
     const correlationId = (req as any).correlationId || 'manual';
@@ -472,9 +517,8 @@ connectionsRouter.get('/:type/threads/:id/draft', requireAuth, userRateLimitMidd
   res.json({
     id: draft.id,
     status: draft.status,
-    subject: draft.subject,
-    bodyText: draft.body_text,
-    bodyHtml: draft.body_html,
+    generatedContent: draft.generated_content,
+    currentContent: draft.current_content,
     version: draft.version,
     generationMetadata: draft.generation_metadata,
     createdAt: draft.created_at,

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     llm_budget_hourly_tokens: int = Field(default=50000, alias="LLM_BUDGET_HOURLY_TOKENS")
     llm_budget_daily_tokens: int = Field(default=200000, alias="LLM_BUDGET_DAILY_TOKENS")
 
+    # Triage
+    triage_batch_size: int = Field(default=25, alias="TRIAGE_BATCH_SIZE")
+
     @property
     def database_url(self) -> str:
         return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"

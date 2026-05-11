@@ -22,6 +22,7 @@ class UserProfile(Base):
     greeting_style = Column(JSON)
     closing_style = Column(JSON)
     signature_template = Column(Text)
+    personalized_profile = Column(Text)
     preferred_tone = Column(String(50))
     communication_norms = Column(JSON)
     current_priorities = Column(JSON)

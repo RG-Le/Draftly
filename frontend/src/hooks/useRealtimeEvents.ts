@@ -136,6 +136,44 @@ export function useRealtimeEvents(enabled = true) {
       'connection:expired': () => {
         notify('Connection expired', 'Reconnect Gmail to continue syncing and sending.', 'warning');
         invalidateCoreQueries(queryClient);
+      },
+      'profile:initialized': () => {
+        queryClient.invalidateQueries({ queryKey: ['profile'] });
+      },
+      'triage:batch_started': (payload) => {
+        notify(
+          'Batch triage started',
+          `Classifying ${payload?.threadCount ?? 'multiple'} threads.`,
+          'info'
+        );
+      },
+      'triage:batch_completed': (payload) => {
+        const results: Array<{ threadId: string; classification: string }> = payload?.results || [];
+        if (results.length > 0) {
+          const classMap = new Map(results.map((r) => [r.threadId, r.classification]));
+          queryClient.setQueriesData<any>({ queryKey: ['threads'] }, (existing: any) => {
+            if (!existing?.threads) return existing;
+            return {
+              ...existing,
+              threads: existing.threads.map((t: any) => {
+                const newClass = classMap.get(t.id);
+                if (!newClass) return t;
+                return { ...t, triage: { ...(t.triage || {}), classification: newClass } };
+              })
+            };
+          });
+          results.forEach((r) => {
+            queryClient.invalidateQueries({ queryKey: ['thread-detail', r.threadId] });
+          });
+        }
+        notify(
+          'Batch triage complete',
+          `${results.length} thread${results.length !== 1 ? 's' : ''} classified.`,
+          'success'
+        );
+      },
+      'triage:batch_failed': (payload) => {
+        notify('Batch triage failed', payload?.error || 'Could not classify threads.', 'danger');
       }
     };
 

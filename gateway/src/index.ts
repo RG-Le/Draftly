@@ -6,6 +6,7 @@ import { EncryptionService } from './infrastructure/encryption/index.js';
 import { startGmailSyncWorker } from './infrastructure/workers/gmail-sync.worker.js';
 import { startSendReplyWorker } from './infrastructure/workers/send-reply.worker.js';
 import { startDraftSyncWorker } from './infrastructure/workers/draft-sync.worker.js';
+import { restoreAutoSyncJobs } from './infrastructure/workers/auto-sync.service.js';
 import { initWebSocket } from './infrastructure/socket/websocket.js';
 import { startEventSubscriber } from './infrastructure/redis/events.js';
 import { logger } from './shared/logger.js';
@@ -59,6 +60,11 @@ async function main(): Promise<void> {
   startSendReplyWorker();
   startDraftSyncWorker();
   logger.info('BullMQ workers started (Gmail sync, Send reply, Draft sync)');
+
+  // 8. Restore auto-sync schedulers for users who had it enabled
+  restoreAutoSyncJobs().catch((err) =>
+    logger.warn({ err }, 'Auto-sync restore encountered an error — non-fatal'),
+  );
 
   // 6. Graceful shutdown
   const shutdown = async (signal: string) => {

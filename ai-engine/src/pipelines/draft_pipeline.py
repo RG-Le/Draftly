@@ -73,6 +73,8 @@ class FormatContextStage(Stage):
             if profile.communication_norms:
                 norms = json.dumps(profile.communication_norms) if isinstance(profile.communication_norms, dict) else str(profile.communication_norms)
                 persona_parts.append(f"Communication norms: {norms}")
+            if profile.personalized_profile:
+                persona_parts.append(f"Writing style instructions: {profile.personalized_profile}")
             if profile.signature_template:
                 persona_parts.append(f"Signature: {profile.signature_template}")
             ctx.data['persona_context'] = "\n".join(persona_parts)

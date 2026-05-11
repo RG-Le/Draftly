@@ -40,20 +40,20 @@ class LLMService:
         
         return await self._execute_with_fallback(messages)
 
-    async def generate_structured(self, system_prompt: str, user_prompt: str, response_format: type[BaseModel]) -> tuple[str, dict[str, Any]]:
+    async def generate_structured(self, system_prompt: str, user_prompt: str, response_format: type[BaseModel], max_tokens: int = 1000) -> tuple[str, dict[str, Any]]:
         """Generate a structured JSON response."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
-        return await self._execute_with_fallback(messages, response_format=response_format)
 
-    async def _execute_with_fallback(self, messages: list[dict], response_format: type[BaseModel] | None = None) -> tuple[str, dict[str, Any]]:
+        return await self._execute_with_fallback(messages, response_format=response_format, max_tokens=max_tokens)
+
+    async def _execute_with_fallback(self, messages: list[dict], response_format: type[BaseModel] | None = None, max_tokens: int = 1000) -> tuple[str, dict[str, Any]]:
         kwargs = {
             "messages": messages,
-            "temperature": 0.2, # Low temperature for accurate triage/draft tone
-            "max_tokens": 1000
+            "temperature": 0.2,
+            "max_tokens": max_tokens
         }
         
         if response_format:

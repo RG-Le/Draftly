@@ -55,6 +55,9 @@ const envSchema = z.object({
   // Rate limits
   RATE_LIMIT_IP_PER_MIN: z.coerce.number().default(200),
   RATE_LIMIT_USER_PER_MIN: z.coerce.number().default(100),
+
+  // Triage
+  TRIAGE_BATCH_SIZE: z.coerce.number().default(25),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

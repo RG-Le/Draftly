@@ -99,6 +99,34 @@ export class CeleryBridge {
   }
 
   /**
+   * Dispatch a batch triage task — classifies multiple threads in a single LLM call.
+   */
+  async dispatchTriageBatchTask(params: {
+    threadIds: string[];
+    userId: string;
+    correlationId: string;
+  }): Promise<string> {
+    const taskId = uuidv4();
+
+    const message = this.buildCeleryMessage({
+      taskId,
+      taskName: 'ai.triage.classify_batch',
+      queue: 'triage-queue',
+      args: [params.threadIds, params.correlationId, params.userId],
+      kwargs: {},
+    });
+
+    await this.publishToQueue('triage-queue', message);
+
+    logger.info(
+      { taskId, threadCount: params.threadIds.length, queue: 'triage-queue' },
+      'CeleryBridge: batch triage task dispatched',
+    );
+
+    return taskId;
+  }
+
+  /**
    * Dispatch a profile build task (initial persona bootstrap from sent emails).
    */
   async dispatchProfileBuildTask(params: {
@@ -181,6 +209,7 @@ export class CeleryBridge {
 
   private async publishToQueue(queue: string, message: string): Promise<void> {
     // Celery with Redis broker uses LPUSH to the queue key
-    await this.redis.lpush(queue, message);
+    const queueLength = await this.redis.lpush(queue, message);
+    logger.debug({ queue, queueDepth: queueLength }, 'CeleryBridge: message pushed to Redis queue');
   }
 }

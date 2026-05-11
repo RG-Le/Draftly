@@ -12,13 +12,19 @@ import {
   startGmailConnection,
   syncInbox
 } from '../api/connections';
-import { getPreferences, getProfile, updatePreference, updateProfile } from '../api/profile';
+import {
+  getAutoSyncPreference,
+  getProfile,
+  updateAutoSyncPreference,
+  updateProfile
+} from '../api/profile';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { EmptyState } from '../components/EmptyState';
 import { LoadingCard } from '../components/LoadingCard';
 import { useToast } from '../context/ToastContext';
 import { getApiErrorMessage } from '../lib/api-error';
+import { formatRelativeTime } from '../lib/format';
 
 export function SettingsPage() {
   const location = useLocation();
@@ -30,19 +36,21 @@ export function SettingsPage() {
     queryFn: getProfile
   });
 
-  const preferencesQuery = useQuery({
-    queryKey: ['preferences'],
-    queryFn: getPreferences
-  });
-
   const connectionsQuery = useQuery({
     queryKey: ['connections'],
     queryFn: listConnections
   });
 
+  const autoSyncQuery = useQuery({
+    queryKey: ['auto-sync-preference'],
+    queryFn: getAutoSyncPreference
+  });
+
   const [signatureTemplate, setSignatureTemplate] = useState('');
   const [preferredTone, setPreferredTone] = useState('professional');
   const [personalizedProfile, setPersonalizedProfile] = useState('');
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
+  const [autoSyncInterval, setAutoSyncInterval] = useState(24);
 
   useEffect(() => {
     if (profileQuery.data) {
@@ -51,6 +59,13 @@ export function SettingsPage() {
       setPersonalizedProfile(profileQuery.data.personalizedProfile || '');
     }
   }, [profileQuery.data]);
+
+  useEffect(() => {
+    if (autoSyncQuery.data) {
+      setAutoSyncEnabled(autoSyncQuery.data.enabled);
+      setAutoSyncInterval(autoSyncQuery.data.intervalHours ?? 24);
+    }
+  }, [autoSyncQuery.data]);
 
   const connection = useMemo(
     () => getPrimaryGmailConnection(connectionsQuery.data || []),
@@ -149,27 +164,31 @@ export function SettingsPage() {
     }
   });
 
-  const toggleAutoSync = useMutation({
-    mutationFn: async (current: boolean) => {
-      await updatePreference('autoSync', !current);
-      return !current;
-    },
-    onSuccess: (next) => {
+  const autoSyncSaveMutation = useMutation({
+    mutationFn: () => updateAutoSyncPreference({ enabled: autoSyncEnabled, intervalHours: autoSyncInterval }),
+    onSuccess: () => {
       pushToast({
-        title: 'Preference updated',
-        description: `Auto sync is now ${next ? 'enabled' : 'disabled'}.`,
+        title: autoSyncEnabled ? 'Auto-sync enabled. Syncing now.' : 'Auto-sync disabled.',
+        description: '',
         tone: 'success'
       });
-      queryClient.invalidateQueries({ queryKey: ['preferences'] });
+      queryClient.invalidateQueries({ queryKey: ['auto-sync-preference'] });
+    },
+    onError: (error) => {
+      pushToast({
+        title: 'Failed to save auto-sync settings',
+        description: getApiErrorMessage(error, 'Could not update auto-sync preference.'),
+        tone: 'danger'
+      });
     }
   });
 
-  const autoSyncPref = preferencesQuery.data?.find((pref) => pref.key === 'autoSync');
-  const autoSyncEnabled = Boolean(autoSyncPref?.value);
   const canSync = isConnectionActive(connection);
   const mustReconnect = needsReconnect(connection);
   const mustConnect = needsInitialConnection(connection);
   const redirectUri = `${window.location.origin}${location.pathname}${location.search}`;
+  const gmailDisabled = !connection || mustConnect || !canSync;
+  const lastSyncAt = autoSyncQuery.data?.lastSyncAt || connection?.lastSyncedAt || null;
 
   return (
     <div className="settings-grid">
@@ -273,29 +292,68 @@ export function SettingsPage() {
 
       <section className="panel">
         <div className="panel-header">
-          <h2>Preferences</h2>
+          <h2>Email Sync</h2>
         </div>
 
-        {preferencesQuery.isLoading ? (
+        {autoSyncQuery.isLoading ? (
           <LoadingCard lines={3} />
         ) : (
-          <div className="preferences-list">
+          <div
+            className="preferences-list"
+            title={gmailDisabled ? 'Connect and activate Gmail before enabling auto-sync' : undefined}
+          >
             <div className="preference-item">
               <div>
                 <h4>Auto Sync</h4>
-                <p>Allow background inbox sync jobs to keep the review queue fresh.</p>
+                <p>
+                  Automatically pull new emails on a schedule.
+                  {lastSyncAt ? ` Last synced: ${formatRelativeTime(lastSyncAt)}.` : ' Never synced.'}
+                </p>
               </div>
               <Button
                 variant="secondary"
-                onClick={() => toggleAutoSync.mutate(autoSyncEnabled)}
-                loading={toggleAutoSync.isPending}
+                onClick={() => setAutoSyncEnabled(!autoSyncEnabled)}
+                disabled={gmailDisabled}
               >
-                {autoSyncEnabled ? 'Disable' : 'Enable'}
+                {autoSyncEnabled ? 'Enabled' : 'Disabled'}
               </Button>
             </div>
+
+            {autoSyncEnabled && (
+              <div className="preference-item">
+                <div>
+                  <h4>Sync Interval</h4>
+                  <p>How often Draftly checks for new emails.</p>
+                </div>
+                <select
+                  value={autoSyncInterval}
+                  disabled={gmailDisabled}
+                  onChange={(e) => setAutoSyncInterval(Number(e.target.value))}
+                >
+                  <option value={1}>Every 1 hour</option>
+                  <option value={2}>Every 2 hours</option>
+                  <option value={4}>Every 4 hours</option>
+                  <option value={6}>Every 6 hours</option>
+                  <option value={12}>Every 12 hours</option>
+                  <option value={24}>Every 24 hours</option>
+                  <option value={48}>Every 2 days</option>
+                  <option value={72}>Every 3 days</option>
+                  <option value={168}>Every week</option>
+                </select>
+              </div>
+            )}
+
+            <Button
+              onClick={() => autoSyncSaveMutation.mutate()}
+              loading={autoSyncSaveMutation.isPending}
+              disabled={gmailDisabled}
+            >
+              Save sync settings
+            </Button>
           </div>
         )}
       </section>
+
     </div>
   );
 }

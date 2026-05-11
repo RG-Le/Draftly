@@ -151,7 +151,11 @@ class SaveProfileStage(Stage):
                     'communication_norms': profile.get('communication_norms'),
                     'confidence_score': profile.get('confidence_score', 0.0),
                     'profile_version': UserProfile.profile_version + 1,
-                    'updated_at': func.now()
+                    'updated_at': func.now(),
+                    **(
+                        {} if ctx.data.get('is_cold_start')
+                        else {'last_calibrated_at': func.now()}
+                    )
                 }
             )
             

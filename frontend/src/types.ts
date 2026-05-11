@@ -143,3 +143,25 @@ export interface AuthSession {
   accessToken: string;
   refreshToken: string;
 }
+
+export interface AutoSyncPreference {
+  enabled: boolean;
+  intervalHours: number;
+  lastSyncAt?: string | null;
+  gmailConnected?: boolean;
+}
+
+export interface UsageStats {
+  period: string;
+  emailsSynced: number;
+  emailsClassified: number;
+  heuristicClassified: number;
+  llmClassified: number;
+  triageBreakdown: Record<string, number>;
+  draftsGenerated: number;
+  draftsApproved: number;
+  draftsSent: number;
+  totalLlmCostUsd: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
