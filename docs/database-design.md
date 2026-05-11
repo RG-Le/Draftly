@@ -73,9 +73,10 @@ erDiagram
 |--------|------|-------------|-------|
 | id | uuid (v7) | PK | |
 | user_id | uuid | FK → users, UNIQUE, NOT NULL | One profile per user |
-| greeting_style | jsonb | | e.g., `{"formal": "Dear", "casual": "Hi"}` |
-| closing_style | jsonb | | e.g., `{"default": "Best regards"}` |
+| greeting_style | jsonb | | e.g., `{"formal": true, "common_phrases": ["Hello", "Hi"]}` |
+| closing_style | jsonb | | e.g., `{"formal": true, "common_phrases": ["Best regards", "Thanks"]}` |
 | signature_template | text | | Full signature block |
+| personalized_profile | text | | AI-generated writing style description |
 | preferred_tone | varchar(50) | | 'professional', 'friendly', 'concise' |
 | communication_norms | jsonb | | Patterns observed from sent emails |
 | current_priorities | jsonb | | Inferred from recent threads |
@@ -138,11 +139,11 @@ UNIQUE constraint: `(connection_id, external_thread_id)`
 |--------|------|-------------|-------|
 | id | uuid (v7) | PK | |
 | thread_id | uuid | FK → email_threads, UNIQUE, NOT NULL | One result per thread |
-| classification | varchar(50) | NOT NULL | 'reply_needed', 'informational_no_action', 'notification_or_subscription', 'cc_or_bulk_low_priority' |
-| method | varchar(20) | NOT NULL | 'heuristic', 'llm', 'hybrid' |
+| classification | varchar(50) | NOT NULL | 'reply_needed', 'promotions', 'info', 'junk' (configurable via triage_categories.json) |
+| method | varchar(20) | NOT NULL | 'heuristic', 'llm', 'batch_llm' |
 | confidence | decimal(3,2) | | 0.0 to 1.0 |
 | reasoning | text | | LLM's explanation or heuristic rule matched |
-| llm_metadata | jsonb | | model, tokens, cost (null if heuristic-only) |
+| llm_metadata | jsonb | | model, tokens, cost — `{ "model": "...", "input_tokens": N, "output_tokens": N, "cost": 0.0 }` |
 | created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 
 ### drafts
@@ -158,10 +159,13 @@ UNIQUE constraint: `(connection_id, external_thread_id)`
 | version | integer | NOT NULL, DEFAULT 1 | Optimistic concurrency control |
 | generation_metadata | jsonb | | model, tokens, cost, prompt_hash |
 | idempotency_key | varchar(255) | UNIQUE, NULLABLE | Generated on approval. Format: `send:{draftId}:v{version}` |
+| external_draft_id | varchar(255) | NULLABLE | Gmail draft ID (for syncing draft to Gmail drafts folder) |
 | created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 | updated_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 
-**Valid statuses:** `draft_pending`, `draft_ready`, `draft_failed`, `draft_edited`, `approved`, `rejected`, `send_queued`, `sending`, `sent`, `send_failed`
+**Valid statuses:** `pending`, `generated`, `edited`, `approved`, `rejected`, `sent`, `send_failed`
+
+> **Note:** The implementation uses simpler status names than originally designed. `draft_pending` → `pending`, `draft_ready` → `generated`, `draft_edited` → `edited`.
 
 ### draft_actions
 
@@ -223,6 +227,21 @@ Partitioned by `RANGE (usage_date)`, monthly partitions.
 | created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 
 Partitioned by `RANGE (created_at)`, monthly partitions.
+
+### prompt_templates
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| id | uuid (v7) | PK | |
+| name | varchar(100) | UNIQUE, NOT NULL | Template identifier (e.g., 'triage_v1', 'draft_v1') |
+| description | text | | Human-readable description |
+| system_prompt | text | NOT NULL | System prompt content |
+| user_prompt_template | text | NOT NULL | User prompt template (may contain Jinja2 variables) |
+| is_active | boolean | NOT NULL, DEFAULT true | Only active templates are served |
+| created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
+| updated_at | timestamptz | NOT NULL, DEFAULT NOW() | |
+
+Used by the AI Engine's `PromptManager` for versioned prompt management with Redis caching.
 
 ---
 

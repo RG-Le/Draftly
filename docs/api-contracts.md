@@ -8,17 +8,20 @@ All endpoints are prefixed with `/api/v1`. All responses are JSON. All timestamp
 
 ### Success
 
+Responses return data directly at the top level (not wrapped in a `data` envelope):
+
 ```json
 {
-  "data": { ... },
+  "threads": [...],
   "pagination": {                    // Only for list endpoints
-    "page": 1,
     "limit": 20,
-    "total": 145,
-    "totalPages": 8
+    "offset": 0,
+    "count": 20
   }
 }
 ```
+
+Some endpoints use offset-based pagination (`limit` + `offset` + `count`) rather than page-based.
 
 ### Error
 
@@ -58,37 +61,33 @@ Start Google OAuth login flow.
 | | |
 |---|---|
 | Auth | Public |
-| Rate limit | 10/min/IP |
-| Query params | `redirect_uri` (optional, for frontend callback) |
-| Response | 302 redirect to Google consent screen |
+| Rate limit | IP rate limit |
+| Query params | `redirect_uri` (optional, frontend callback URL — must be in CORS_ORIGINS whitelist) |
+| Response | 302 redirect to Google consent screen (scopes: profile, email) |
 
 ### `GET /api/v1/auth/google/callback`
 
-Handle Google OAuth callback.
+Handle Google OAuth callback. Issues JWT tokens.
 
 | | |
 |---|---|
-| Auth | Public |
-| Rate limit | 10/min/IP |
-| Query params | `code`, `state` (CSRF token) |
-| Response | `201` on new user, `200` on existing |
+| Auth | Public (Passport handles Google verification) |
+| Rate limit | IP rate limit |
+| Query params | `code`, `state` (from Google) |
 
+With `redirect_uri` in state: 302 redirect to frontend with `?accessToken=...&refreshToken=...` query params.
+
+Without redirect_uri (Postman/testing fallback):
 ```json
 {
-  "data": {
-    "user": {
-      "id": "uuid",
-      "email": "user@gmail.com",
-      "name": "John Doe",
-      "role": "user",
-      "authProvider": "google"
-    },
-    "tokens": {
-      "accessToken": "jwt...",
-      "refreshToken": "jwt...",
-      "expiresIn": 900
-    }
-  }
+  "message": "Google login successful",
+  "user": {
+    "id": "uuid",
+    "email": "user@gmail.com",
+    "name": "John Doe"
+  },
+  "accessToken": "jwt...",
+  "refreshToken": "jwt..."
 }
 ```
 
@@ -99,11 +98,17 @@ Traditional email/password registration.
 | | |
 |---|---|
 | Auth | Public |
-| Rate limit | 5/min/IP |
+| Rate limit | IP rate limit |
 | Body | `{ "email": "string", "password": "string", "name": "string" }` |
 | Validation | Email format, password min 8 chars, name required |
 
-Response: Same format as Google callback.
+```json
+{
+  "user": { "id": "uuid", "email": "...", "name": "..." },
+  "accessToken": "jwt...",
+  "refreshToken": "jwt..."
+}
+```
 
 ### `POST /api/v1/auth/login`
 
@@ -112,10 +117,10 @@ Traditional login.
 | | |
 |---|---|
 | Auth | Public |
-| Rate limit | 10/min/IP |
+| Rate limit | IP rate limit |
 | Body | `{ "email": "string", "password": "string" }` |
 
-Response: Same format as Google callback.
+Response: Same format as register.
 
 ### `POST /api/v1/auth/refresh`
 
@@ -124,15 +129,31 @@ Refresh access token.
 | | |
 |---|---|
 | Auth | Refresh token in body |
-| Rate limit | 30/min/user |
+| Rate limit | IP rate limit |
 | Body | `{ "refreshToken": "string" }` |
 
 ```json
 {
-  "data": {
-    "accessToken": "jwt...",
-    "expiresIn": 900
-  }
+  "accessToken": "jwt...",
+  "refreshToken": "jwt..."
+}
+```
+
+### `GET /api/v1/auth/me`
+
+Get current authenticated user.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "id": "uuid",
+  "email": "user@gmail.com",
+  "name": "John Doe",
+  "role": "user"
 }
 ```
 
@@ -143,204 +164,244 @@ Invalidate refresh token.
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 10/min/user |
+| Rate limit | User rate limit |
 | Response | 204 |
 
 ---
 
 ## Connection Endpoints
 
-### `POST /api/v1/connections/initiate`
+### `GET /api/v1/connections`
 
-Start OAuth flow for an external service.
+List all connectors and user's connection status.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 5/min/user |
-| Body | `{ "connectorType": "gmail" }` |
+| Rate limit | User rate limit |
 
 ```json
 {
-  "data": {
-    "authUrl": "https://accounts.google.com/o/oauth2/v2/auth?...",
-    "state": "csrf-token"
-  }
+  "connectors": [
+    {
+      "type": "gmail",
+      "displayName": "Gmail",
+      "category": "email",
+      "description": "...",
+      "connected": true,
+      "isUsable": true,
+      "status": "active",
+      "lastSyncedAt": "2026-04-18T10:30:00Z",
+      "lastSyncStatus": "success"
+    }
+  ]
 }
 ```
+
+### `GET /api/v1/connections/connect/:type`
+
+Start OAuth flow for an external service (currently Gmail only).
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+| Query params | `redirect_uri` (optional, for frontend callback after OAuth) |
+
+```json
+{
+  "authUrl": "https://accounts.google.com/o/oauth2/v2/auth?..."
+}
+```
+
+### `GET /api/v1/connections/reconnect/:type`
+
+Re-initiate OAuth for expired/revoked connection. Same behavior as `/connect/:type`.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
 
 ### `GET /api/v1/connections/callback`
 
-Handle external service OAuth callback.
+Handle external service OAuth callback (browser redirect from Google).
 
 | | |
 |---|---|
-| Auth | JWT (via state parameter) |
-| Rate limit | 5/min/user |
-| Query params | `code`, `state`, `connector` |
+| Auth | None (userId from signed `state` parameter) |
+| Rate limit | IP rate limit |
+| Query params | `code`, `state`, `scope`, `error` |
 
+On success with `redirect_uri` in state: 302 redirect to frontend with `?gmail_connected=true&connectionId=uuid`.
+
+On success without redirect_uri (Postman fallback):
 ```json
 {
-  "data": {
-    "connection": {
-      "id": "uuid",
-      "connectorType": "gmail",
-      "status": "active",
-      "connectorMetadata": {
-        "email": "user@gmail.com",
-        "scopesGranted": ["gmail.readonly", "gmail.send"]
-      },
-      "createdAt": "2026-04-18T10:00:00Z"
-    }
+  "message": "Gmail connected successfully",
+  "connectionId": "uuid",
+  "status": "active",
+  "syncQueued": true,
+  "permissions": {
+    "canRead": true,
+    "canSend": true,
+    "canModify": false
   }
 }
 ```
 
-### `GET /api/v1/connections`
+The callback also:
+- Verifies all required scopes were granted (returns error if missing)
+- Bootstraps a default user profile on first connection
+- Triggers initial Gmail sync automatically
 
-List user's connections.
-
-| | |
-|---|---|
-| Auth | JWT |
-| Rate limit | 60/min/user |
-
-```json
-{
-  "data": {
-    "connections": [
-      {
-        "id": "uuid",
-        "connectorType": "gmail",
-        "status": "active",
-        "lastSyncedAt": "2026-04-18T10:30:00Z",
-        "lastSyncStatus": "success",
-        "createdAt": "2026-04-18T10:00:00Z"
-      }
-    ]
-  }
-}
-```
-
-### `DELETE /api/v1/connections/:id`
-
-Disconnect an external service. Revokes tokens.
-
-| | |
-|---|---|
-| Auth | JWT |
-| Rate limit | 5/min/user |
-| Response | 204 |
-
-### `POST /api/v1/connections/:id/reconnect`
-
-Re-initiate OAuth for expired/revoked connection.
-
-| | |
-|---|---|
-| Auth | JWT |
-| Rate limit | 5/min/user |
-
-Response: Same as `POST /connections/initiate`.
-
----
-
-## Inbox Endpoints
-
-### `POST /api/v1/inbox/sync`
+### `POST /api/v1/connections/:type/sync`
 
 Trigger manual inbox sync.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 5/min/user |
-| Body | `{ "connectionId": "uuid" }` (optional — syncs all if omitted) |
+| Rate limit | User rate limit |
+| Body | `{ "maxResults": 20 }` (optional) |
 
 ```json
 {
-  "data": {
-    "jobId": "uuid",
-    "message": "Sync started"
-  }
+  "message": "Sync job queued",
+  "jobId": "gmail-sync-uuid",
+  "connectionId": "uuid"
 }
 ```
 
-### `GET /api/v1/inbox/threads`
+### `DELETE /api/v1/connections/:type`
 
-List threads with triage status.
+Disconnect (revoke) an external service.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 60/min/user |
-| Query params | `page` (default 1), `limit` (default 20, max 50), `classification` (filter), `sort` (default `-lastMessageAt`) |
+| Rate limit | User rate limit |
 
 ```json
 {
-  "data": {
-    "threads": [
-      {
-        "id": "uuid",
-        "subject": "Q3 Budget Review",
-        "participants": [{"email": "boss@company.com", "name": "Jane"}],
-        "messageCount": 4,
-        "lastMessageAt": "2026-04-18T09:00:00Z",
-        "syncStatus": "synced",
-        "triage": {
-          "classification": "reply_needed",
-          "confidence": 0.92,
-          "method": "heuristic"
-        },
-        "latestDraft": {
-          "id": "uuid",
-          "status": "draft_ready"
-        }
-      }
-    ]
-  },
-  "pagination": { "page": 1, "limit": 20, "total": 85, "totalPages": 5 }
+  "message": "gmail disconnected"
 }
 ```
 
-### `GET /api/v1/inbox/threads/:id`
+---
 
-Thread detail with messages and triage.
+## Thread Endpoints
+
+All thread endpoints are scoped under `/api/v1/connections/:type/threads`.
+
+### `GET /api/v1/connections/:type/threads`
+
+List synced threads with triage and draft status.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 60/min/user |
+| Rate limit | User rate limit |
+| Query params | `limit` (default 20, max 100), `offset` (default 0), `category` (filter by triage classification) |
 
 ```json
 {
-  "data": {
-    "thread": {
+  "threads": [
+    {
       "id": "uuid",
+      "externalThreadId": "gmail-thread-id",
       "subject": "Q3 Budget Review",
-      "participants": [...],
+      "participants": [{"email": "boss@company.com", "name": "Jane"}],
       "messageCount": 4,
-      "lastMessageAt": "2026-04-18T09:00:00Z"
-    },
-    "messages": [
-      {
-        "id": "uuid",
-        "from": "boss@company.com",
-        "to": ["user@gmail.com"],
-        "cc": [],
-        "subject": "Re: Q3 Budget Review",
-        "bodyText": "Can you send the updated numbers?",
-        "receivedAt": "2026-04-18T09:00:00Z",
-        "isSentByUser": false
+      "lastMessageAt": "2026-04-18T09:00:00Z",
+      "syncStatus": "synced",
+      "triage": {
+        "classification": "reply_needed",
+        "confidence": 0.92,
+        "reasoning": "Direct question from sender"
+      },
+      "draft": {
+        "status": "generated"
       }
-    ],
-    "triage": {
-      "classification": "reply_needed",
-      "confidence": 0.92,
-      "method": "heuristic",
-      "reasoning": "Direct question from sender, user in To"
     }
-  }
+  ],
+  "pagination": { "limit": 20, "offset": 0, "count": 20 }
+}
+```
+
+### `GET /api/v1/connections/:type/threads/:id`
+
+Thread detail with full message history.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "thread": {
+    "id": "uuid",
+    "subject": "Q3 Budget Review",
+    "participants": [...],
+    "messageCount": 4,
+    "lastMessageAt": "2026-04-18T09:00:00Z"
+  },
+  "messages": [
+    {
+      "id": "uuid",
+      "fromAddress": "boss@company.com",
+      "toAddresses": ["user@gmail.com"],
+      "ccAddresses": [],
+      "subject": "Re: Q3 Budget Review",
+      "bodyText": "Can you send the updated numbers?",
+      "bodyHtml": "<p>Can you send...</p>",
+      "receivedAt": "2026-04-18T09:00:00Z",
+      "isSentByUser": false
+    }
+  ]
+}
+```
+
+### `GET /api/v1/connections/:type/threads/:id/triage`
+
+Get AI classification for a thread.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "id": "uuid",
+  "classification": "reply_needed",
+  "confidenceScore": 0.92,
+  "reasoning": "Direct question from sender, user in To",
+  "actionRequired": true,
+  "urgencyScore": 0.8,
+  "metadata": {...},
+  "createdAt": "2026-04-18T09:01:00Z"
+}
+```
+
+Returns `{ "status": "pending_or_missing" }` if not yet classified.
+
+### `POST /api/v1/connections/:type/threads/:id/triage`
+
+Trigger manual re-triage (deletes existing result and re-classifies).
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "message": "Re-triage triggered",
+  "taskId": "celery-task-uuid",
+  "threadId": "uuid",
+  "correlationId": "manual-triage-uuid"
 }
 ```
 
@@ -348,169 +409,152 @@ Thread detail with messages and triage.
 
 ## Draft Endpoints
 
-### `GET /api/v1/drafts`
+Draft operations are scoped under `/api/v1/connections/:type/threads/:id/draft`.
 
-List drafts.
+### `GET /api/v1/connections/:type/threads/:id/draft`
+
+Get the latest AI-generated draft for a thread.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 60/min/user |
-| Query params | `status` (filter), `page`, `limit` |
+| Rate limit | User rate limit |
 
 ```json
 {
-  "data": {
-    "drafts": [
-      {
-        "id": "uuid",
-        "threadId": "uuid",
-        "threadSubject": "Q3 Budget Review",
-        "status": "draft_ready",
-        "currentContent": "Hi Jane, here are the updated numbers...",
-        "version": 1,
-        "createdAt": "2026-04-18T09:05:00Z",
-        "updatedAt": "2026-04-18T09:05:00Z"
-      }
-    ]
+  "id": "uuid",
+  "status": "generated",
+  "generatedContent": "AI-generated original...",
+  "currentContent": "User-edited version (or same as generated)...",
+  "version": 1,
+  "generationMetadata": {
+    "model": "gemini-2.0-flash",
+    "input_tokens": 1200,
+    "output_tokens": 350,
+    "cost": 0.0004
   },
-  "pagination": { ... }
+  "createdAt": "2026-04-18T09:05:00Z",
+  "updatedAt": "2026-04-18T09:05:00Z"
 }
 ```
 
-### `GET /api/v1/drafts/:id`
+Returns `{ "status": "not_generated" }` if no draft exists.
 
-Draft detail with thread context and action history.
+### `POST /api/v1/connections/:type/threads/:id/draft`
+
+Trigger manual draft generation.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 60/min/user |
+| Rate limit | User rate limit |
 
 ```json
 {
-  "data": {
-    "draft": {
-      "id": "uuid",
-      "threadId": "uuid",
-      "generatedContent": "AI-generated original...",
-      "currentContent": "User-edited version...",
-      "status": "draft_edited",
-      "version": 2,
-      "generationMetadata": {
-        "model": "gemini-2.0-flash",
-        "inputTokens": 1200,
-        "outputTokens": 350,
-        "estimatedCost": 0.0004
-      },
-      "createdAt": "2026-04-18T09:05:00Z"
-    },
-    "thread": { ... },
-    "actions": [
-      {
-        "actionType": "edit",
-        "createdAt": "2026-04-18T09:10:00Z"
-      }
-    ]
-  }
+  "message": "Manual draft generation triggered",
+  "taskId": "celery-task-uuid",
+  "threadId": "uuid",
+  "correlationId": "manual-draft-uuid"
 }
 ```
 
-### `PUT /api/v1/drafts/:id`
+### `PUT /api/v1/connections/:type/threads/:id/draft`
 
 Edit draft content.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 30/min/user |
-| Body | `{ "content": "string", "expectedVersion": 2 }` |
+| Rate limit | User rate limit |
+| Body | `{ "content": "string" }` |
 
-Returns 409 if version mismatch (another edit happened since you loaded).
+Returns 409 if draft is in `sent` or `approved` state.
 
 ```json
 {
-  "data": {
-    "draft": {
-      "id": "uuid",
-      "currentContent": "Updated content...",
-      "status": "draft_edited",
-      "version": 3
-    }
-  }
+  "id": "uuid",
+  "status": "edited",
+  "version": 2,
+  "currentContent": "Updated content...",
+  "updatedAt": "2026-04-18T09:10:00Z"
 }
 ```
 
-### `POST /api/v1/drafts/:id/approve`
+Also syncs the updated content to the Gmail drafts folder if an external draft exists.
+
+### `POST /api/v1/connections/:type/threads/:id/approve`
 
 Approve draft for sending.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 10/min/user |
-| Body | `{ "expectedVersion": 3 }` |
+| Rate limit | User rate limit |
 
-Returns 409 if draft was modified since user loaded it.
-Returns 409 if draft was already approved and sent.
+Returns 409 if draft was already approved or sent.
 
 ```json
 {
-  "data": {
-    "draft": {
-      "id": "uuid",
-      "status": "approved",
-      "idempotencyKey": "send:uuid:v3"
-    },
-    "sendAttempt": {
-      "id": "uuid",
-      "status": "pending",
-      "queuedAt": "2026-04-18T09:15:00Z"
-    }
-  }
+  "status": "approved",
+  "message": "Draft approved and queued for sending",
+  "jobId": "bullmq-job-id"
 }
 ```
 
-### `POST /api/v1/drafts/:id/reject`
+### `POST /api/v1/connections/:type/threads/:id/reject`
 
 Reject draft.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 10/min/user |
-| Body | `{ "reason": "string" }` (optional) |
+| Rate limit | User rate limit |
+
+Returns 409 if draft was already sent.
 
 ```json
 {
-  "data": {
-    "draft": {
-      "id": "uuid",
-      "status": "rejected"
-    }
-  }
+  "status": "rejected",
+  "message": "Draft has been rejected"
 }
 ```
 
-### `POST /api/v1/drafts/:id/regenerate`
+Also deletes the Gmail draft from the user's drafts folder if one exists.
 
-Request new AI draft for the same thread.
+---
+
+## Inbox Endpoint
+
+### `GET /api/v1/inbox`
+
+Unified inbox view across active connections (alternative to `/connections/:type/threads`).
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 5/min/user |
-| Body | `{ "instructions": "Make it more formal" }` (optional hint) |
+| Rate limit | User rate limit |
+| Query params | `limit` (default 50, max 100), `offset` (default 0), `category` (filter by triage classification) |
 
 ```json
 {
-  "data": {
-    "draft": {
+  "threads": [
+    {
       "id": "uuid",
-      "status": "draft_pending"
-    },
-    "jobId": "celery-task-uuid"
-  }
+      "externalThreadId": "gmail-thread-id",
+      "subject": "Q3 Budget Review",
+      "participants": [{"email": "boss@company.com", "name": "Jane"}],
+      "messageCount": 4,
+      "lastMessageAt": "2026-04-18T09:00:00Z",
+      "syncStatus": "synced",
+      "triage": {
+        "classification": "reply_needed",
+        "confidence": 0.92,
+        "reasoning": "Direct question from sender"
+      },
+      "draftStatus": "generated"
+    }
+  ],
+  "pagination": { "limit": 50, "offset": 0, "count": 20 }
 }
 ```
 
@@ -523,59 +567,111 @@ Request new AI draft for the same thread.
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 30/min/user |
+| Rate limit | User rate limit |
 
 ```json
 {
-  "data": {
-    "profile": {
-      "greetingStyle": {"formal": "Dear", "casual": "Hi"},
-      "closingStyle": {"default": "Best regards"},
-      "signatureTemplate": "-- \nJohn Doe\nSenior Engineer",
-      "preferredTone": "professional",
-      "communicationNorms": {...},
-      "profileVersion": 3,
-      "confidenceScore": 0.78,
-      "lastCalibratedAt": "2026-04-15T00:00:00Z"
-    }
+  "exists": true,
+  "profile": {
+    "preferredTone": "professional",
+    "personalizedProfile": "Write professionally and clearly...",
+    "greetingStyle": {"formal": true, "common_phrases": ["Hello", "Hi"]},
+    "closingStyle": {"formal": true, "common_phrases": ["Best regards", "Thanks"]},
+    "signatureTemplate": "-- \nJohn Doe",
+    "communicationNorms": {"sentence_length": "medium", "uses_bullet_points": false},
+    "confidenceScore": "0.78",
+    "profileVersion": 3,
+    "lastCalibratedAt": "2026-04-15T00:00:00Z"
   }
 }
 ```
+
+Returns `{ "exists": false, "profile": null, "message": "..." }` if no profile exists.
 
 ### `PUT /api/v1/profile`
 
-Update profile fields (partial update).
+Update profile fields (partial update). Accepts both camelCase and snake_case field names.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 10/min/user |
-| Body | Any subset of profile fields |
-
-### `GET /api/v1/preferences`
-
-| Auth | JWT |
-| Rate limit | 30/min/user |
+| Rate limit | User rate limit |
+| Body | Any subset: `{ "preferredTone": "string", "personalizedProfile": "string", "signatureTemplate": "string" }` |
 
 ```json
 {
-  "data": {
-    "preferences": [
-      { "key": "defaultTone", "value": "professional" },
-      { "key": "autoSync", "value": true },
-      { "key": "syncInterval", "value": 5 }
-    ]
+  "exists": true,
+  "profile": { ... }
+}
+```
+
+### `DELETE /api/v1/profile`
+
+Reset the user's profile (forces re-generation on next sync).
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "message": "Profile reset. It will be re-generated on next sync."
+}
+```
+
+### `GET /api/v1/preferences`
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "autoSync": {
+    "enabled": false,
+    "intervalHours": 24
   }
 }
 ```
 
-### `PUT /api/v1/preferences`
+### `GET /api/v1/preferences/auto-sync`
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 10/min/user |
-| Body | `{ "key": "string", "value": any }` |
+| Rate limit | User rate limit |
+
+```json
+{
+  "enabled": false,
+  "intervalHours": 24,
+  "lastSyncAt": "2026-04-18T10:30:00Z",
+  "gmailConnected": true
+}
+```
+
+### `PUT /api/v1/preferences/auto-sync`
+
+Enable/disable auto-sync with configurable interval.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+| Body | `{ "enabled": true, "intervalHours": 24 }` |
+| Validation | `enabled` must be boolean, `intervalHours` must be integer 1–168 |
+
+When enabling, triggers an immediate sync. Requires an active Gmail connection.
+
+```json
+{
+  "enabled": true,
+  "intervalHours": 24,
+  "message": "Auto-sync enabled. Emails sync every 24 hour(s). Syncing now."
+}
+```
 
 ---
 
@@ -583,69 +679,62 @@ Update profile fields (partial update).
 
 ### `GET /api/v1/usage`
 
-Detailed usage records.
+Aggregated usage metrics for the authenticated user.
 
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 30/min/user |
-| Query params | `from` (date), `to` (date), `resourceType` (filter), `page`, `limit` |
+| Rate limit | User rate limit |
+| Query params | `period` — one of `7d`, `30d`, `90d`, `all` (default: `30d`) |
 
 ```json
 {
-  "data": {
-    "records": [
-      {
-        "resourceType": "llm_output_tokens",
-        "resourceDetail": "gemini-2.0-flash",
-        "quantity": 350,
-        "estimatedCostUsd": 0.0004,
-        "usageDate": "2026-04-18",
-        "correlationId": "corr-uuid"
-      }
-    ]
+  "period": {
+    "label": "30d",
+    "from": "2026-03-18T00:00:00.000Z",
+    "to": "2026-04-18T10:00:00.000Z"
   },
-  "pagination": { ... }
-}
-```
-
-### `GET /api/v1/usage/summary`
-
-Aggregated usage summary.
-
-| | |
-|---|---|
-| Auth | JWT |
-| Rate limit | 10/min/user |
-| Query params | `month` (YYYY-MM) |
-
-```json
-{
-  "data": {
-    "month": "2026-04",
-    "totalEstimatedCost": 2.47,
-    "currency": "USD",
-    "breakdown": {
-      "llm": {
-        "inputTokens": 187420,
-        "outputTokens": 42800,
-        "totalRequests": 156,
-        "estimatedCost": 2.31,
-        "byModel": {
-          "gemini-2.0-flash": { "requests": 140, "cost": 1.89 },
-          "gemini-1.5-flash": { "requests": 16, "cost": 0.42 }
-        }
-      },
-      "gmail": {
-        "syncCalls": 640,
-        "sendCalls": 89
-      },
-      "draftsGenerated": 134,
-      "emailsSent": 89
+  "summary": {
+    "emailsSynced": 145,
+    "emailsClassified": 130,
+    "heuristicClassified": 45,
+    "llmClassified": 85,
+    "triageBreakdown": {
+      "reply_needed": 42,
+      "promotions": 38,
+      "info": 45,
+      "junk": 5
+    },
+    "draftsGenerated": 42,
+    "draftsPending": 3,
+    "draftsApproved": 30,
+    "draftsSent": 28,
+    "draftsRejected": 5,
+    "emailsSent": 28,
+    "llmCost": {
+      "triageUsd": 0.012,
+      "draftingUsd": 0.089,
+      "totalUsd": 0.101
+    },
+    "tokens": {
+      "triageInput": 45000,
+      "triageOutput": 8500,
+      "draftInput": 120000,
+      "draftOutput": 35000,
+      "totalInput": 165000,
+      "totalOutput": 43500,
+      "grandTotal": 208500
     }
+  },
+  "autoSync": {
+    "enabled": false,
+    "intervalHours": 24,
+    "lastSyncAt": "2026-04-18T10:30:00Z"
   }
 }
 ```
+
+> **Note:** The implementation does not use a separate `usage_records` table for tracking. Instead, costs and tokens are computed directly from `triage_results.llm_metadata` and `drafts.generation_metadata` JSONB columns. This avoids double-writes while still providing accurate aggregation.
 
 ---
 
@@ -656,36 +745,26 @@ Aggregated usage summary.
 | | |
 |---|---|
 | Auth | JWT |
-| Rate limit | 30/min/user |
-| Query params | `page`, `limit`, `from`, `to` |
+| Rate limit | User rate limit |
+| Limit | 50 most recent |
 
 ```json
 {
-  "data": {
-    "sends": [
-      {
-        "id": "uuid",
-        "draftId": "uuid",
-        "threadSubject": "Q3 Budget Review",
-        "status": "sent",
-        "externalMessageId": "gmail-msg-id",
-        "attemptNumber": 1,
-        "queuedAt": "2026-04-18T09:15:00Z",
-        "completedAt": "2026-04-18T09:15:03Z"
-      }
-    ]
-  },
-  "pagination": { ... }
+  "sends": [
+    {
+      "id": "uuid",
+      "status": "delivered",
+      "queuedAt": "2026-04-18T09:15:00Z",
+      "completedAt": "2026-04-18T09:15:03Z",
+      "errorMessage": null,
+      "draftId": "uuid",
+      "content": "Hi Jane, here are the updated numbers...",
+      "subject": "Re: Q3 Budget Review",
+      "externalThreadId": "gmail-thread-id"
+    }
+  ]
 }
 ```
-
-### `GET /api/v1/history/actions`
-
-| | |
-|---|---|
-| Auth | JWT |
-| Rate limit | 30/min/user |
-| Query params | `page`, `limit`, `entityType`, `actionType` |
 
 ---
 
@@ -693,9 +772,11 @@ Aggregated usage summary.
 
 ### `GET /api/v1/admin/health`
 
+Deep health check — verifies DB and Redis connectivity.
+
 | | |
 |---|---|
-| Auth | API Key |
+| Auth | Public |
 
 ```json
 {
@@ -703,57 +784,53 @@ Aggregated usage summary.
   "uptime": 86400,
   "components": {
     "database": { "status": "up", "latencyMs": 3 },
-    "redis": { "status": "up", "latencyMs": 1 },
-    "aiEngine": { "status": "up", "latencyMs": 15 },
-    "gmail": { "status": "up" }
-  },
-  "queues": {
-    "gmail-sync-queue": { "waiting": 5, "active": 3, "failed": 0 },
-    "gmail-send-queue": { "waiting": 0, "active": 1, "failed": 0 },
-    "triage-queue": { "waiting": 12, "active": 8, "failed": 0 },
-    "draft-queue": { "waiting": 4, "active": 3, "failed": 1 },
-    "profile-queue": { "waiting": 0, "active": 0, "failed": 0 }
+    "redis": { "status": "up", "latencyMs": 1 }
   }
 }
 ```
 
-### `GET /api/v1/admin/metrics`
+Returns 503 with `"status": "degraded"` if any component is down.
 
-Prometheus text format. Scraped by monitoring infrastructure.
+### `GET /api/v1/admin/ping`
 
-| Auth | API Key |
-
-### `GET /api/v1/admin/users`
+Lightweight liveness probe — no external dependency checks.
 
 | | |
 |---|---|
-| Auth | Admin JWT |
-| Rate limit | 10/min |
+| Auth | Public |
 
-### `GET /api/v1/admin/usage/global`
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-04-18T10:30:00.000Z"
+}
+```
 
-| | |
-|---|---|
-| Auth | Admin JWT |
-| Rate limit | 10/min |
+> **Note:** The documented admin endpoints for metrics, user listing, and global usage are not yet implemented. The health endpoint is public (no API key required) in the current implementation.
 
 ---
 
 ## WebSocket Events
 
-Connect: `wss://host/ws` with JWT in handshake auth.
+Connect: Socket.IO at the gateway's HTTP server. Authentication via JWT in handshake.
+
+Events are published from the Python AI Engine via Redis pub/sub (`draftly:events` channel) and forwarded by the Node gateway to the specific user's socket room.
 
 | Event | Direction | Payload |
 |-------|-----------|---------|
-| `sync:started` | Server → Client | `{ connectionId, jobId }` |
-| `sync:progress` | Server → Client | `{ connectionId, processed, total }` |
-| `sync:completed` | Server → Client | `{ connectionId, newThreads, updatedThreads }` |
-| `sync:failed` | Server → Client | `{ connectionId, error }` |
-| `triage:completed` | Server → Client | `{ threadId, classification, confidence }` |
-| `draft:ready` | Server → Client | `{ draftId, threadId, subject }` |
-| `draft:failed` | Server → Client | `{ draftId, threadId, error }` |
-| `send:queued` | Server → Client | `{ draftId, attemptId }` |
-| `send:success` | Server → Client | `{ draftId, externalMessageId }` |
-| `send:failed` | Server → Client | `{ draftId, error, retryable }` |
-| `connection:expiring` | Server → Client | `{ connectionId, expiresAt }` |
-| `connection:expired` | Server → Client | `{ connectionId }` |
+| `sync:started` | Server → Client | `{ connectionId, correlationId }` |
+| `sync:completed` | Server → Client | `{ connectionId, correlationId, newThreads, updatedThreads }` |
+| `sync:failed` | Server → Client | `{ connectionId, correlationId, error }` |
+| `triage:started` | Server → Client | `{ userId, threadId, correlationId }` |
+| `triage:completed` | Server → Client | `{ userId, threadId, correlationId, classification, confidence, reasoning }` |
+| `draft:ready` | Server → Client | `{ userId, draftId, threadId }` |
+| `draft:failed` | Server → Client | `{ userId, threadId, error }` |
+| `profile:initialized` | Server → Client | `{ userId, preferredTone, signatureTemplate, personalizedProfile }` |
+| `profile:updated` | Server → Client | `{ userId }` |
+
+### Implementation Notes
+
+- The gateway uses `emitToUser(userId, event, data)` to target specific users
+- Redis pub/sub channel: `draftly:events`
+- Events are fire-and-forget — if the user is offline, they'll see updated state on next API call
+- The frontend `useRealtimeEvents` hook and `PipelineStatusContext` consume these events

@@ -12,97 +12,55 @@ Production platform is not decided yet. This doc covers local deployment in deta
 
 ## Local Deployment (Docker Compose)
 
+### Current Setup
+
+The Docker Compose file runs **infrastructure services only** (Postgres, PgBouncer, Redis). The application services (Gateway, AI Engine) are run locally for faster development iteration.
+
 ### Services
 
 | Service | Image | Port | Role |
 |---------|-------|------|------|
-| `gateway` | Custom (Node.js) | 3000 | REST API + WebSocket + BullMQ workers |
-| `ai-engine-worker` | Custom (Python) | — | Celery workers (triage, draft, profile) |
-| `ai-engine-api` | Custom (Python) | 8000 | FastAPI health/admin endpoints |
-| `celery-beat` | Custom (Python) | — | Celery scheduler (periodic tasks) |
 | `postgres` | postgres:16-alpine | 5432 | Primary database |
 | `pgbouncer` | edoburu/pgbouncer | 6432 | Connection pooler |
 | `redis` | redis:7-alpine | 6379 | Queues + cache + pub/sub |
 
-### Docker Compose
+Application services (commented out in docker-compose.yml, run locally):
+| Service | Port | How to run locally |
+|---------|------|-------------------|
+| Gateway | 3000 | `cd gateway && npm run dev` |
+| AI Engine Worker | — | `cd ai-engine && celery -A src.celery_app worker --queues=triage-queue,draft-queue,profile-queue` |
+| AI Engine API | 8000 | `cd ai-engine && uvicorn src.main:app --port 8000 --reload` |
+| Frontend | 5173 | `cd frontend && npm run dev` |
+
+### Docker Compose (actual)
 
 ```yaml
 services:
-  gateway:
-    build:
-      context: ./gateway
-      dockerfile: Dockerfile
-    command: npm run dev
-    ports: ["3000:3000"]
-    env_file: .env
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    volumes:
-      - ./gateway/src:/app/src
-    restart: unless-stopped
-
-  ai-engine-worker:
-    build:
-      context: ./ai-engine
-      dockerfile: Dockerfile
-    command: >
-      celery -A src.celery_app worker
-      --loglevel=info
-      --concurrency=4
-      --queues=triage-queue,draft-queue,profile-queue
-    env_file: .env
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    volumes:
-      - ./ai-engine/src:/app/src
-    restart: unless-stopped
-
-  ai-engine-api:
-    build:
-      context: ./ai-engine
-      dockerfile: Dockerfile
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-    ports: ["8000:8000"]
-    env_file: .env
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    restart: unless-stopped
-
-  celery-beat:
-    build:
-      context: ./ai-engine
-      dockerfile: Dockerfile
-    command: celery -A src.celery_app beat --loglevel=info
-    env_file: .env
-    depends_on: [redis]
-    restart: unless-stopped
-
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: draftly
       POSTGRES_USER: draftly
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-draftly_dev}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
     ports: ["5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: pg_isready -U draftly
+      test: ["CMD-SHELL", "pg_isready -U draftly -d draftly"]
       interval: 5s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
   pgbouncer:
-    image: edoburu/pgbouncer
+    image: edoburu/pgbouncer:latest
     environment:
-      DATABASE_URL: postgres://draftly:${DB_PASSWORD:-draftly_dev}@postgres:5432/draftly
+      DATABASE_URL: postgres://draftly:${DB_PASSWORD:-draftly_dev_password}@postgres:5432/draftly
+      LISTEN_PORT: 6432
       MAX_CLIENT_CONN: 200
       DEFAULT_POOL_SIZE: 40
       POOL_MODE: transaction
+      AUTH_TYPE: plain
     ports: ["6432:6432"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -111,11 +69,16 @@ services:
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
     volumes:
       - redisdata:/data
     healthcheck:
-      test: redis-cli ping
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -126,33 +89,7 @@ volumes:
   redisdata:
 ```
 
-### Dockerfiles
-
-**Gateway (Node.js):**
-
-```dockerfile
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-EXPOSE 3000
-CMD ["node", "dist/index.js"]
-```
-
-**AI Engine (Python):**
-
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-RUN pip install --no-cache-dir poetry
-COPY pyproject.toml poetry.lock ./
-RUN poetry config virtualenvs.create false && poetry install --no-interaction
-COPY . .
-EXPOSE 8000
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
+> **Note:** The docker-compose.yml also contains commented-out service definitions for gateway, ai-engine-worker, ai-engine-api, and celery-beat. These can be uncommented for full containerized deployment.
 
 ### Local Startup Steps
 
@@ -163,65 +100,81 @@ cd draftly
 cp .env.example .env
 # Edit .env with your Google OAuth credentials, Gemini API key, etc.
 
-# 2. Start all services
+# 2. Start infrastructure
 docker compose up -d
 
 # 3. Run migrations
-docker compose exec gateway npx knex migrate:latest
+cd gateway && npx knex migrate:latest
 
-# 4. Verify
-curl http://localhost:3000/api/v1/admin/health
-curl http://localhost:8000/health
+# 4. Generate JWT keys (if not present)
+cd gateway && mkdir -p keys
+openssl genrsa -out keys/private.pem 2048
+openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 
-# 5. View logs
-docker compose logs -f gateway
-docker compose logs -f ai-engine-worker
+# 5. Start services locally
+# Terminal 1: Gateway
+cd gateway && npm run dev
+
+# Terminal 2: AI Engine worker
+cd ai-engine && celery -A src.celery_app worker --loglevel=info --queues=triage-queue,draft-queue,profile-queue
+
+# Terminal 3: Frontend
+cd frontend && npm run dev
+
+# 6. Verify
+curl http://localhost:3000/api/v1/health
 ```
 
-### Local Environment Variables (.env.example)
+### Local Environment Variables (.env)
 
 ```bash
-# ===== Database =====
-DB_HOST=pgbouncer
+# ===== Application =====
+NODE_ENV=development
+API_PORT=3000
+CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:5173
+
+# ===== Database (PgBouncer) =====
+DB_HOST=localhost
 DB_PORT=6432
 DB_NAME=draftly
 DB_USER=draftly
-DB_PASSWORD=draftly_dev
+DB_PASSWORD=draftly_dev_password
 
 # ===== Redis =====
-REDIS_URL=redis://redis:6379
+REDIS_URL=redis://127.0.0.1:6379
 
-# ===== Auth =====
+# ===== Google OAuth (Login - Step 1) =====
 GOOGLE_CLIENT_ID=your-client-id
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/v1/auth/google/callback
+
+# ===== Gmail OAuth (Mail scopes - Step 2) =====
 GMAIL_CALLBACK_URL=http://localhost:3000/api/v1/connections/callback
 
+# ===== JWT (RS256) =====
 JWT_PRIVATE_KEY_PATH=./keys/private.pem
 JWT_PUBLIC_KEY_PATH=./keys/public.pem
 JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=7d
 
 # ===== Encryption =====
-SECRET_ENCRYPTION_KEY=your-32-byte-hex-string
+SECRET_ENCRYPTION_KEY=your-64-char-hex-string
 
 # ===== LLM =====
 GEMINI_API_KEY=your-gemini-api-key
-OPENROUTER_API_KEY=                   # Optional, leave empty to use Gemini
+OPENROUTER_API_KEY=                   # Optional
 LLM_PRIMARY_MODEL=gemini/gemini-2.0-flash
 LLM_FALLBACK_MODEL=gemini/gemini-1.5-flash
-
-# ===== App =====
-NODE_ENV=development
-API_PORT=3000
-CORS_ORIGINS=http://localhost:3001
-ADMIN_API_KEY=your-admin-key
 
 # ===== Rate Limits =====
 RATE_LIMIT_IP_PER_MIN=200
 RATE_LIMIT_USER_PER_MIN=100
-LLM_BUDGET_HOURLY_TOKENS=50000
-LLM_BUDGET_DAILY_TOKENS=200000
+
+# ===== Triage =====
+TRIAGE_BATCH_SIZE=25
+
+# ===== Admin =====
+ADMIN_API_KEY=dev-admin-key
 ```
 
 ---

@@ -41,7 +41,21 @@ Node enqueues jobs for Python by writing Celery-compatible messages to Redis. Th
 Node.js CeleryBridge → Redis LPUSH to queue key → Celery worker BRPOP from same key
 ```
 
+### CeleryBridge Methods
+
+```typescript
+class CeleryBridge {
+  dispatchTriageTask({ threadId, userId, correlationId }): Promise<string>;
+  dispatchTriageBatchTask({ threadIds, userId, correlationId }): Promise<string>;
+  dispatchDraftTask({ threadId, userId, correlationId }): Promise<string>;
+  dispatchProfileUpdateTask({ userId, draftId, correlationId }): Promise<string>;
+  dispatchProfileBuildTask({ userId, correlationId }): Promise<string>;
+}
+```
+
 ### Message format
+
+The CeleryBridge builds Celery v2 protocol messages with base64-encoded body:
 
 ```json
 {
@@ -65,9 +79,13 @@ Node.js CeleryBridge → Redis LPUSH to queue key → Celery worker BRPOP from s
 
 | Queue | Tasks | Consumer |
 |-------|-------|----------|
-| `triage-queue` | `ai.triage.classify` | Python Celery worker |
+| `triage-queue` | `ai.triage.classify`, `ai.triage.classify_batch` | Python Celery worker |
 | `draft-queue` | `ai.draft.generate` | Python Celery worker |
-| `profile-queue` | `ai.profile.update` | Python Celery worker |
+| `profile-queue` | `ai.profile.build` | Python Celery worker |
+
+### Batch Triage
+
+The primary triage path uses batch classification. After Gmail sync, the gateway collects all unclassified thread IDs and dispatches them in chunks (configurable via `TRIAGE_BATCH_SIZE`, default 25). The batch task classifies multiple threads in a single LLM call, significantly reducing cost and latency.
 
 ### Failure handling
 
@@ -109,10 +127,11 @@ Single channel: `draftly:events`
 
 | Event | When | Contains |
 |-------|------|----------|
-| `triage:completed` | Triage pipeline finishes | threadId, classification, confidence |
-| `draft:ready` | Draft generation succeeds | draftId, threadId, subject |
-| `draft:failed` | Draft generation fails | draftId, threadId, error |
-| `profile:updated` | Profile update applied | userId, fieldsChanged |
+| `triage:started` | Triage task begins | userId, threadId, correlationId |
+| `triage:completed` | Triage pipeline finishes | userId, threadId, correlationId, classification, confidence, reasoning |
+| `draft:ready` | Draft generation succeeds | userId, draftId, threadId |
+| `draft:failed` | Draft generation fails | userId, threadId, error |
+| `profile:updated` | Profile update applied | userId |
 
 ### Node-side handling
 

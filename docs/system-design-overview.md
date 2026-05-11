@@ -88,18 +88,18 @@ sequenceDiagram
     participant LLM as LLM Provider
 
     Note over U,LLM: SYNC (Node handles Gmail I/O)
-    U->>N: POST /inbox/sync
+    U->>N: POST /connections/:type/sync
     N->>G: Fetch emails (OAuth token)
     G-->>N: Raw emails
     N->>PG: Store normalized emails
-    N->>RD: Enqueue triage jobs
+    N->>RD: Enqueue batch triage jobs (CeleryBridge)
 
     Note over U,LLM: TRIAGE (Python handles AI)
-    RD-->>Py: Triage job
-    Py->>PG: Read thread
-    Py->>LLM: Classify (if heuristic uncertain)
-    Py->>PG: Store triage result
-    Py->>RD: Enqueue draft job (if reply_needed)
+    RD-->>Py: Batch triage job
+    Py->>PG: Read threads
+    Py->>LLM: Classify batch (if not no-reply heuristic)
+    Py->>PG: Store triage results
+    Py->>RD: Enqueue draft jobs (for reply_needed threads)
 
     Note over U,LLM: DRAFT (Python handles AI)
     RD-->>Py: Draft job
@@ -111,12 +111,12 @@ sequenceDiagram
     N->>U: "Draft ready"
 
     Note over U,LLM: REVIEW + SEND (Node handles workflow)
-    U->>N: POST /drafts/:id/approve
-    N->>PG: Approve (transactional + optimistic lock)
-    N->>RD: Enqueue send job
+    U->>N: POST /connections/:type/threads/:id/approve
+    N->>PG: Approve draft
+    N->>RD: Enqueue send job (BullMQ)
     RD-->>N: Send worker
     N->>G: Send threaded reply
-    N->>PG: Record result + usage
+    N->>PG: Record result
     N->>U: "Reply sent"
 ```
 
@@ -136,8 +136,9 @@ sequenceDiagram
 | Logging | Pino | structlog |
 | Testing | Jest + Supertest | pytest + pytest-asyncio |
 | Encryption | Node crypto (AES-256-GCM) | — |
+| Rate Limiting | rate-limiter-flexible (Redis) | — |
 
-LLM provider compatibility: **OpenRouter** (primary, when available) + **Google Gemini** (free tier, for development and fallback). LiteLLM abstracts both behind one interface.
+LLM provider compatibility: **Google Gemini** (primary, free tier for development) + **OpenRouter** (when API key available) + **OpenAI-compatible** (custom base URL). LiteLLM abstracts all behind one interface.
 
 ---
 
