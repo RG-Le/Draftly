@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 venv/
 .claude
-
+.kiro
 # Build output
 dist/
 *.egg-info/
