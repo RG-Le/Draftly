@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { getDatabase } from '../../database/connection.js';
 import { getRedis } from '../../redis/connection.js';
 import { loadConfig } from '../../../config/index.js';
@@ -24,6 +25,73 @@ const DEFAULT_PROFILE_TEXT =
   'use bullets only when listing multiple distinct items.';
 
 const config = loadConfig();
+
+// Allowlist of origins the redirectUri is permitted to point to (mirrors CORS_ORIGINS).
+const allowedFrontendOrigins = config.CORS_ORIGINS.split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+/**
+ * Validates a redirectUri against the CORS_ORIGINS allowlist.
+ * Returns the safe URI string, or null if disallowed/invalid.
+ */
+function getSafeRedirectUri(input: unknown): string | null {
+  if (typeof input !== 'string' || input.length === 0) return null;
+  try {
+    const parsed = new URL(input);
+    const isAllowed = allowedFrontendOrigins.some((origin) => origin === parsed.origin);
+    return isAllowed ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Signs an OAuth state payload with HMAC-SHA256 using SECRET_ENCRYPTION_KEY.
+ * Format: base64(json).base64(hmac)
+ *
+ * This prevents an attacker from forging a state containing a victim's userId,
+ * because they cannot produce a valid HMAC without knowing the secret.
+ */
+function signOAuthState(payload: Record<string, unknown>): string {
+  // Use first 32 bytes of the hex key as raw HMAC key material
+  const keyBytes = Buffer.from(config.SECRET_ENCRYPTION_KEY.slice(0, 64), 'hex');
+  const json = JSON.stringify(payload);
+  const data = Buffer.from(json).toString('base64url');
+  const sig = createHmac('sha256', keyBytes).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+/**
+ * Verifies an HMAC-signed state string produced by signOAuthState().
+ * Throws ValidationError if the signature is missing or tampered.
+ */
+function verifyOAuthState(state: string): Record<string, unknown> {
+  const parts = state.split('.');
+  // base64url data and base64url sig — both are single-segment (no internal dots)
+  if (parts.length < 2) {
+    throw new ValidationError('Invalid OAuth state: missing signature');
+  }
+  // Last segment is the HMAC; everything before it is the data
+  const sig = parts[parts.length - 1];
+  const data = parts.slice(0, -1).join('.');
+
+  const keyBytes = Buffer.from(config.SECRET_ENCRYPTION_KEY.slice(0, 64), 'hex');
+  const expectedSig = createHmac('sha256', keyBytes).update(data).digest('base64url');
+
+  // Constant-time comparison to prevent timing attacks
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
+    throw new ValidationError('Invalid OAuth state: signature mismatch');
+  }
+
+  try {
+    return JSON.parse(Buffer.from(data, 'base64url').toString('utf-8'));
+  } catch {
+    throw new ValidationError('Invalid OAuth state: malformed payload');
+  }
+}
 
 // NOTE: Auth middleware is applied PER-ROUTE, not globally.
 // The /callback route is a Google redirect (no Bearer token), so it must be excluded.
@@ -78,11 +146,13 @@ connectionsRouter.get('/connect/:type', requireAuth, userRateLimitMiddleware, as
       config.GMAIL_CALLBACK_URL,
     );
 
+    // Sign the state with HMAC-SHA256 to prevent state forgery (Vuln 1 fix)
+    const safeRedirectUri = getSafeRedirectUri(redirectUri) || null;
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
       scope: connector.scopes,
-      state: JSON.stringify({ userId, connectorType: type, redirectUri: redirectUri || null }),
+      state: signOAuthState({ userId, connectorType: type, redirectUri: safeRedirectUri }),
       include_granted_scopes: true,
     });
 
@@ -113,11 +183,13 @@ connectionsRouter.get('/reconnect/:type', requireAuth, userRateLimitMiddleware, 
     );
 
     // Re-prompt for consent to force Google to issue a new refresh token
+    // Sign the state with HMAC-SHA256 to prevent state forgery (Vuln 1 fix)
+    const safeRedirectUri = getSafeRedirectUri(redirectUri) || null;
     const authUrl = oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
       scope: connector.scopes,
-      state: JSON.stringify({ userId, connectorType: type, redirectUri: redirectUri || null }),
+      state: signOAuthState({ userId, connectorType: type, redirectUri: safeRedirectUri }),
       include_granted_scopes: true,
     });
 
@@ -149,14 +221,20 @@ connectionsRouter.get('/callback', ipRateLimitMiddleware, async (req: Request, r
     throw new ValidationError('Missing code or state in callback');
   }
 
-  let stateData: { userId: string; connectorType: string; redirectUri?: string | null };
+  // Verify HMAC signature — prevents state forgery attack (Vuln 1 fix)
+  let stateData: Record<string, unknown>;
   try {
-    stateData = JSON.parse(state);
-  } catch {
-    throw new ValidationError('Invalid state parameter');
+    stateData = verifyOAuthState(state);
+  } catch (err) {
+    logger.warn({ err }, 'OAuth callback: state signature verification failed');
+    throw new ValidationError('Invalid or tampered OAuth state');
   }
 
-  const { userId, connectorType, redirectUri } = stateData;
+  const userId = stateData.userId as string;
+  const connectorType = stateData.connectorType as string;
+  // Re-validate the redirectUri through the allowlist even though we signed it at origin
+  // (defence-in-depth: Vuln 2 fix)
+  const redirectUri = getSafeRedirectUri(stateData.redirectUri);
 
   // ---- Scope Verification ----
   // Google returns the granted scopes in the `scope` query param (space-separated).
@@ -269,7 +347,8 @@ connectionsRouter.get('/callback', ipRateLimitMiddleware, async (req: Request, r
       maxResults: 20,
     });
 
-    // Redirect to frontend if a redirect_uri was provided, otherwise return JSON (Postman fallback)
+    // Redirect to frontend if a redirect_uri was provided, otherwise return JSON (Postman fallback).
+    // redirectUri has already been validated through getSafeRedirectUri() above (Vuln 2 fix).
     if (redirectUri) {
       const url = new URL(redirectUri);
       url.searchParams.set('gmail_connected', 'true');

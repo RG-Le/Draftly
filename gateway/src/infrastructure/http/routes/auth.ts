@@ -81,9 +81,11 @@ authRouter.get(
     const refreshToken = await tokenService.generateRefreshToken(user);
 
     if (state.redirectUri) {
+      // Deliver tokens via URL fragment (#) — fragments are NOT sent to servers,
+      // do NOT appear in access logs or Referer headers, and are NOT captured
+      // by logging proxies. This prevents refresh token leakage (Vuln 3 fix).
       const redirectUrl = new URL(state.redirectUri);
-      redirectUrl.searchParams.set('accessToken', accessToken);
-      redirectUrl.searchParams.set('refreshToken', refreshToken);
+      redirectUrl.hash = `accessToken=${encodeURIComponent(accessToken)}&refreshToken=${encodeURIComponent(refreshToken)}`;
       res.redirect(302, redirectUrl.toString());
       return;
     }
