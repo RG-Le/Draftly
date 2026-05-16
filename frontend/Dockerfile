@@ -1,14 +1,21 @@
-FROM node:20-alpine
+# Build stage
+FROM node:20-alpine AS build
 WORKDIR /app
 
-# Install dependencies
 COPY package*.json ./
 RUN npm ci
 
-# Copy source (will be overridden by volume mounts in dev)
 COPY . .
 
-EXPOSE 3001
+# Frontend runtime config baked at build time (Vite)
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 
-# Run the Vite dev server, bound to all interfaces so Docker can forward
-CMD ["npm", "run", "dev"]
+RUN npm run build
+
+# Production stage
+FROM nginx:alpine AS production
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 3001
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,5 +1,6 @@
 """SQLAlchemy async engine and session factory."""
 
+import ssl as ssl_lib
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from src.config.settings import get_settings
 
@@ -37,12 +38,26 @@ def get_engine():
     global _engine
     if _engine is None:
         settings = get_settings()
+
+        connect_args = {}
+        if settings.db_ssl:
+            if settings.db_ssl_reject_unauthorized and settings.db_ssl_ca:
+                ctx = ssl_lib.create_default_context(cadata=settings.db_ssl_ca)
+            elif settings.db_ssl_reject_unauthorized:
+                ctx = ssl_lib.create_default_context()
+            else:
+                ctx = ssl_lib.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl_lib.CERT_NONE
+            connect_args["ssl"] = ctx
+
         # Using NullPool is recommended when using asyncio.run() repeatedly (like in Celery)
         # to avoid connection leakage and 'MissingGreenlet' errors during teardown.
         _engine = create_async_engine(
             settings.database_url,
             poolclass=NullPool,
             echo=False,
+            connect_args=connect_args,
         )
     return _engine
 

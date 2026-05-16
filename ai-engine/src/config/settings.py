@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     db_name: str = Field(default="draftly", alias="DB_NAME")
     db_user: str = Field(default="draftly", alias="DB_USER")
     db_password: str = Field(alias="DB_PASSWORD")
+    db_ssl: bool = Field(default=False, alias="DB_SSL")
+    db_ssl_reject_unauthorized: bool = Field(default=True, alias="DB_SSL_REJECT_UNAUTHORIZED")
+    db_ssl_ca: str | None = Field(default=None, alias="DB_SSL_CA")
 
     # Redis
     redis_url: str = Field(default="redis://redis:6379", alias="REDIS_URL")

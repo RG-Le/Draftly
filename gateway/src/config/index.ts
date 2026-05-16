@@ -3,6 +3,21 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as dotenv from 'dotenv';
 
+function parseEnvBool(value: unknown, defaultValue: boolean): boolean {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'on'].includes(v)) return true;
+    if (['false', '0', 'no', 'n', 'off'].includes(v)) return false;
+  }
+  return defaultValue;
+}
+
+const envBool = (defaultValue: boolean) =>
+  z.preprocess((v) => parseEnvBool(v, defaultValue), z.boolean());
+
 // Try to load the root .env file if running locally
 const envPath = path.resolve(process.cwd(), '../.env');
 if (fs.existsSync(envPath)) {
@@ -24,6 +39,9 @@ const envSchema = z.object({
   DB_NAME: z.string().default('draftly'),
   DB_USER: z.string().default('draftly'),
   DB_PASSWORD: z.string(),
+  DB_SSL: envBool(false),
+  DB_SSL_REJECT_UNAUTHORIZED: envBool(true),
+  DB_SSL_CA: z.string().optional(),
 
   // Redis
   REDIS_URL: z.string().default('redis://localhost:6379'),
