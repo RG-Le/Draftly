@@ -50,7 +50,7 @@ Important exports:
 | Function | Notes |
 |----------|-------|
 | `listConnections()` | Parses `payload.connectors` **or** `.connections` **or** `.data.connectors` arrays |
-| `syncInbox()` | Prefers **`POST /api/v1/inbox/sync`**, fallback **`POST /api/v1/connections/gmail/sync`** |
+| `syncInbox(connectionId?, daysBack?)` | Prefers **`POST /api/v1/inbox/sync`**, fallback **`POST /api/v1/connections/gmail/sync`**. Accepts optional `daysBack` (1–15) sent in request body along with `maxResults: 50`. |
 | `disconnectConnection(connectionId?, connectorType?)` | Tries **`DELETE /api/v1/connections/:id`** first, fallback **`DELETE /api/v1/connections/:connectorType`** |
 | `completeConnectionCallback` | `GET /api/v1/connections/callback`, **`auth: false`** (browser redirect hasn’t populated SPA token in some setups — module forces unauthenticated GET) |
 
@@ -92,6 +92,31 @@ Preferred **`GET /api/v1/drafts`**; if missing (`404`/`405`), derives list by it
 ### `api/profile.ts`
 
 `GET|PUT /api/v1/profile`, `GET|PUT /api/v1/preferences` — returns **empty / null gracefully** when backend lacks routes.
+
+Also exports triage preference functions (re-exported from the same module for convenience in `SettingsPage`):
+
+| Function | Method & path |
+|----------|----------------|
+| `getProfile()` | `GET /api/v1/profile` |
+| `updateProfile(patch)` | `PUT /api/v1/profile` |
+| `getPreferences()` | `GET /api/v1/preferences` |
+| `getAutoSyncPreference()` | `GET /api/v1/preferences/auto-sync` |
+| `updateAutoSyncPreference(data)` | `PUT /api/v1/preferences/auto-sync` |
+| `regenerateProfile()` | `POST /api/v1/profile/regenerate` |
+| `getTriagePreferences()` | `GET /api/v1/preferences/triage` |
+| `updateTriagePreferences(data)` | `PUT /api/v1/preferences/triage` |
+
+---
+
+### `api/triage.ts`
+
+Dedicated triage module with preferences and category definitions.
+
+| Function | Notes |
+|----------|-------|
+| `getTriagePreferences()` | `GET /api/v1/preferences/triage` — returns `{ customInstructions: string \| null }`. Gracefully returns `null` on 404/405. |
+| `updateTriagePreferences(data)` | `PUT /api/v1/preferences/triage` — body: `{ customInstructions: string }` |
+| `getTriageCategories()` | Returns a **static** category list (not fetched from backend). Each category has `id`, `label`, `description`, and `isSystem` flag. System categories: `reply_needed`, `info`, `promotions`. Non-system: `already_replied`, `junk`. |
 
 ---
 

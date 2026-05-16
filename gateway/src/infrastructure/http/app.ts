@@ -33,10 +33,7 @@ export function createApp(_config: EnvConfig): express.Application {
   // 4. CORS whitelist
   app.use(
     cors({
-      origin: function (_origin, callback) {
-        // Temporarily allow all origins for UI development
-        callback(null, true);
-      },
+      origin: _config.CORS_ORIGINS.split(',').map((o) => o.trim()),
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'Accept'],
       credentials: true,

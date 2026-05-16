@@ -1,0 +1,127 @@
+services:
+  # ===== PostgreSQL 16 =====
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: draftly
+      POSTGRES_USER: draftly
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U draftly -d draftly"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===== PgBouncer =====
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    ports:
+      - "6432:6432"
+    environment:
+      DATABASE_URL: postgres://draftly:${DB_PASSWORD:-draftly_dev_password}@postgres:5432/draftly
+      LISTEN_PORT: 6432
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 40
+      POOL_MODE: transaction
+      AUTH_TYPE: plain
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===== Redis 7 =====
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===== Node.js Gateway =====
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=pgbouncer
+      - DB_PORT=6432
+      - REDIS_URL=redis://redis:6379
+      - API_PORT=3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./gateway/src:/app/src
+      - ./gateway/keys:/app/keys
+    command: sh -c "npx tsx node_modules/knex/bin/cli.js --knexfile src/infrastructure/database/knexfile.ts migrate:latest && npx tsx watch src/index.ts"
+    restart: unless-stopped
+
+  # ===== Python AI Engine — Celery Worker =====
+  ai-engine-worker:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    command: >
+      celery -A src.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=triage-queue,draft-queue,profile-queue
+    env_file: .env
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379
+      - SSL_VERIFY=false
+      - LITELLM_SSL_VERIFY=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./ai-engine/src:/app/src
+    restart: unless-stopped
+
+  # ===== Frontend (Vite dev server) =====
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/public:/app/public
+      - frontend_node_modules:/app/node_modules
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  frontend_node_modules:

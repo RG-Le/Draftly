@@ -125,39 +125,49 @@ The triage pipeline supports both single-thread and batch classification modes.
 ### Single-Thread Pipeline
 
 ```
-LoadThreadContext → HeuristicPreFilter → LLMClassification → StoreResult
+LoadThreadStage → CheckUserRepliedStage → LLMTriageStage → SaveTriageResultStage
 ```
 
 ### Batch Pipeline (primary mode, triggered after sync)
 
 ```
-LoadBatchThreads → HeuristicPreFilter → BatchLLMClassification → StoreBatchResults → EnqueueDraftsForReplyNeeded
+LoadBatchThreadsStage → BatchLLMTriageStage → SaveBatchTriageResultsStage
 ```
 
 ### Stages
 
-**1. LoadThreadContextStage** — Reads thread + latest message from DB. Extracts: subject, from_address, body text.
+**1. LoadThreadStage** — Reads thread + all messages from DB, ordered chronologically. Extracts: subject, from_address, body text.
 
-**2. HeuristicPreFilterStage** — Fast no-reply detection:
-- Sender matches `no-reply`, `noreply`, `do-not-reply` patterns → classified as `info` with confidence 1.0, `should_stop = True`
-- All other threads proceed to LLM classification.
+**2. CheckUserRepliedStage** — Detects if the user has already replied after the last incoming message addressed to them. Multi-party thread aware: only considers messages where the user is in the `To` field. If the user's last reply is newer than the last incoming message addressed to them, classifies as `already_replied` with confidence 1.0 and sets `skip_llm = True` to bypass the LLM stage.
 
-**3. LLMClassificationStage** — Calls LLM with structured output (Pydantic `TriageResponse` model). Returns JSON with `classification`, `confidence`, and `reasoning`. Uses `generate_structured()` for type-safe responses.
+**3. LLMTriageStage** — Heuristic pre-filter first: if sender matches `no-reply`/`noreply`/`do-not-reply` patterns → classified as `info` with confidence 1.0 (no LLM call). Otherwise calls LLM with structured output (Pydantic `TriageResponse` model). Returns JSON with `classification`, `confidence`, and `reasoning`. Uses `generate_structured()` for type-safe responses. **Custom instructions** are loaded from `user_preferences` table (key: `triage_settings`) and appended to the system prompt as "Additional user-specific rules."
 
-**4. BatchLLMClassificationStage** — Processes multiple threads in a single LLM call. Builds a numbered list of emails and requests a `BatchTriageResponse` with results array. Falls back to individual classification if batch parsing fails.
+**4. SaveTriageResultStage** — Upserts result to `triage_results` table using **`ON CONFLICT DO UPDATE`** (allows re-classification on manual re-triage). Records LLM metadata (model, tokens, cost).
 
-**5. StoreTriageResultStage** — Upserts result to `triage_results` table using `ON CONFLICT DO NOTHING`. Records LLM metadata (model, tokens, cost).
+**5. BatchLLMTriageStage** — Processes multiple threads in a single LLM call. Applies heuristic pre-filters first (no-reply detection + user-replied check), then builds a numbered list of remaining emails and requests a `BatchTriageResponse` with results array. Falls back to default classification if batch parsing fails. Also loads and appends custom instructions.
 
-**6. EnqueueDraftIfNeededStage** — If classification is `reply_needed`, publishes a `triage:completed` event and the calling task enqueues a draft generation task.
+**6. SaveBatchTriageResultsStage** — Bulk-inserts all batch triage results with **`ON CONFLICT DO UPDATE`** for idempotency.
 
 ### Triage Categories (from `triage_categories.json`)
 
 Categories are externalized to a JSON config file, not hardcoded:
 - `reply_needed` — Requires a response from the user
+- `already_replied` — User has already sent a reply after the last incoming message
 - `promotions` — Marketing, newsletters, deals
 - `info` — Informational notifications, no response needed
 - `junk` — Spam or irrelevant content
 - Default fallback: `info`
+
+### Custom Instructions
+
+Users can set custom triage rules via `PUT /api/v1/preferences/triage` (max 500 chars). These are stored in the `user_preferences` table with key `triage_settings`. During triage, the pipeline loads these instructions and appends them to the LLM system prompt:
+
+```
+Additional user-specific rules:
+{custom_instructions}
+```
+
+This allows users to override default classification behavior for specific senders or patterns.
 
 ### Batch Optimization
 
@@ -168,22 +178,30 @@ After Gmail sync, unclassified threads are dispatched in batches (configurable v
 ## Draft Generation Pipeline
 
 ```
-LoadThreadHistory → LoadUserProfile → FormatContext → GenerateDraft → StoreDraft
+LoadThreadHistory → LoadUserProfile → FormatContext → LLMDraftGeneration → SaveDraft
 ```
 
 ### Stages
 
-**1. LoadThreadHistoryStage** — Loads all messages for the thread, ordered chronologically.
+**1. LoadThreadHistoryStage** — Loads all messages for the thread, ordered chronologically. Also loads the user's email address for context labeling.
 
 **2. LoadUserProfileStage** — Reads the user's personalized communication profile from `user_profiles` table.
 
-**3. FormatContextStage** — Formats messages into a readable chronological context block for the LLM. Truncates to last 6000 characters for extremely long threads.
+**3. FormatContextStage** — Formats messages into a readable chronological context block for the LLM. Labels user-sent messages as `[YOU replied]` to help the LLM understand conversation flow. Truncates to last 6000 characters for extremely long threads. Builds persona context from user profile (tone, greeting/closing style, communication norms, signature).
 
-**4. GenerateDraftStage** — Calls LLM via `PromptManager` to load the draft prompt template, then generates the reply using thread context and user profile. Uses the `draft_v1` prompt template.
+**4. LLMDraftGenerationStage** — Calls LLM via `PromptManager` to load the draft prompt template (`draft_v1`), then generates the reply using thread context and user profile. **Handles `[NO_REPLY_NEEDED]` response:** if the LLM determines no reply is appropriate, sets `ctx.data["no_reply_needed"] = True` and `ctx.should_stop = True` to skip the save stage.
 
-**5. StoreDraftStage** — Writes to `drafts` table with status `generated`, stores generation metadata (model, tokens, cost). Uses `ON CONFLICT` to handle re-generation gracefully.
+**5. SaveDraftStage** — Writes to `drafts` table with status `generated`, stores generation metadata (model, tokens, cost). Uses upsert logic: if an existing draft exists for the thread, updates it in place (no versioning). Otherwise creates a new draft.
 
 After storage, the task publishes a `draft:ready` event via Redis pub/sub for real-time WebSocket notification.
+
+### Metadata-First Sync Impact on Draft Pipeline
+
+Because sync uses `format: 'metadata'` (no body fetched), the gateway ensures full body content is available before dispatching draft generation:
+
+1. **Manual draft trigger** (`POST /connections/:type/threads/:id/draft`): Gateway checks if messages have body content. If not, calls `GmailAdapter.fetchThreadFull()` to fetch and cache bodies, then dispatches the Celery task.
+2. **Draft regeneration** (`POST /connections/:type/threads/:id/regenerate`): Same body-fetch-first pattern.
+3. **Profile pipeline**: Sent email bodies are fetched before profile build dispatch to ensure the LLM has actual email content to analyze.
 
 ---
 

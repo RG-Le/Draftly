@@ -285,3 +285,44 @@ REDIS_URL=redis://localhost:6379
 - Secrets in platform-native secret store (Railway secrets, AWS Secrets Manager, Azure Key Vault)
 - Environment variables injected at deploy time
 - No `.env` files in production
+
+---
+
+## Account Deletion
+
+`DELETE /api/v1/auth/me` permanently removes the authenticated user's account and all associated data.
+
+**Cascade behavior:**
+- All refresh tokens revoked from Redis before DB deletion
+- `user_connections` → `email_threads` → `email_messages`, `triage_results`, `drafts` (CASCADE)
+- `user_profiles`, `user_preferences`, `usage_records`, `draft_actions` (CASCADE)
+- Single `DELETE FROM users WHERE id = $userId` triggers all cascades
+
+**Security:**
+- Protected by `requireAuth` + `userRateLimitMiddleware`
+- Only deletes the authenticated user's own account (userId from JWT)
+- No admin override — users can only delete themselves
+
+---
+
+## Input Validation (Zod)
+
+Profile and preference endpoints use Zod schemas for server-side validation:
+
+| Endpoint | Validated Fields |
+|----------|-----------------|
+| `PUT /profile` | `preferredTone` (enum whitelist), `personalizedProfile` (max 2000 chars), `signatureTemplate` (max 500 chars) |
+| `PUT /preferences/triage` | `customInstructions` (string, max 500 chars) |
+| `PUT /preferences/auto-sync` | `enabled` (boolean), `intervalHours` (integer 1–168) |
+
+Validation errors return 400 with field-level details:
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "preferredTone: Invalid enum value. Expected 'professional' | 'casual' | 'friendly' | 'formal' | 'concise'"
+  }
+}
+```
+
+**Note:** Knex.js parameterizes all queries automatically — SQL injection is not a concern. Zod validation is for data integrity and prompt injection prevention (user profile text is injected into LLM prompts).

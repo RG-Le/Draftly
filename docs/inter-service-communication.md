@@ -129,9 +129,14 @@ Single channel: `draftly:events`
 |-------|------|----------|
 | `triage:started` | Triage task begins | userId, threadId, correlationId |
 | `triage:completed` | Triage pipeline finishes | userId, threadId, correlationId, classification, confidence, reasoning |
+| `triage:batch_started` | Batch triage begins | userId, threadCount, correlationId |
+| `triage:batch_completed` | Batch triage finishes | userId, results (array of thread classifications) |
+| `triage:batch_retrying` | Batch triage retry | userId, attempt, maxAttempts, retryInSeconds |
+| `triage:batch_failed` | Batch triage permanently failed | userId, error, threadCount, permanent |
 | `draft:ready` | Draft generation succeeds | userId, draftId, threadId |
 | `draft:failed` | Draft generation fails | userId, threadId, error |
 | `profile:updated` | Profile update applied | userId |
+| `profile_generated` | Profile pipeline completed | userId |
 
 ### Node-side handling
 

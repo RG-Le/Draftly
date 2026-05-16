@@ -118,3 +118,56 @@ preferencesRouter.put('/auto-sync', requireAuth, userRateLimitMiddleware, async 
       : 'Auto-sync disabled.',
   });
 });
+
+// ============================================================================
+// GET /preferences/triage — Get user's triage preferences
+// ============================================================================
+preferencesRouter.get('/triage', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {
+  const userId = (req as any).user.id;
+  const db = getDatabase();
+
+  const pref = await db('user_preferences')
+    .where({ user_id: userId, key: 'triage_settings' })
+    .first();
+
+  const value = pref?.value ?? { custom_instructions: null };
+
+  res.json({
+    customInstructions: value.custom_instructions ?? null,
+  });
+});
+
+// ============================================================================
+// PUT /preferences/triage — Update user's triage preferences
+// ============================================================================
+preferencesRouter.put('/triage', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {
+  const userId = (req as any).user.id;
+  const { customInstructions } = req.body;
+
+  if (customInstructions !== undefined && customInstructions !== null) {
+    if (typeof customInstructions !== 'string') {
+      throw new ValidationError('customInstructions must be a string');
+    }
+    if (customInstructions.length > 500) {
+      throw new ValidationError('customInstructions must be 500 characters or fewer');
+    }
+  }
+
+  const db = getDatabase();
+  const value = { custom_instructions: customInstructions || null };
+
+  await db('user_preferences')
+    .insert({
+      user_id: userId,
+      key: 'triage_settings',
+      value: JSON.stringify(value),
+      updated_at: new Date(),
+    })
+    .onConflict(['user_id', 'key'])
+    .merge(['value', 'updated_at']);
+
+  res.json({
+    customInstructions: value.custom_instructions,
+    message: 'Triage preferences updated.',
+  });
+});

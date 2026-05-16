@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     """All configuration from environment. Validated at startup."""
 
     # Database (direct PG, not PgBouncer — Celery workers need persistent connections)
-    db_host: str = Field(default="postgres", alias="DB_HOST")
-    db_port: int = Field(default=5432)
+    db_host: str = Field(default="localhost", alias="DB_HOST")
+    db_port: int = Field(default=5432, alias="DB_PORT")
     db_name: str = Field(default="draftly", alias="DB_NAME")
     db_user: str = Field(default="draftly", alias="DB_USER")
     db_password: str = Field(alias="DB_PASSWORD")
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     db_ssl_ca: str | None = Field(default=None, alias="DB_SSL_CA")
 
     # Redis
-    redis_url: str = Field(default="redis://redis:6379", alias="REDIS_URL")
+    redis_url: str = Field(default="redis://127.0.0.1:6379", alias="REDIS_URL")
 
     # LLM
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")

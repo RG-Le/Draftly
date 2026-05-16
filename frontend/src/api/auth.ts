@@ -96,3 +96,10 @@ export async function logout(refreshToken?: string): Promise<void> {
     body: refreshToken ? { refreshToken } : {}
   });
 }
+
+export async function deleteAccount(): Promise<void> {
+  await apiRequest({
+    path: '/api/v1/auth/me',
+    method: 'DELETE'
+  });
+}

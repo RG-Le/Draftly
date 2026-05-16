@@ -159,6 +159,45 @@ The Gmail sync worker also handles:
 - Job deduplication by connectionId (only one active sync per connection)
 - Automatic batch triage dispatch for unclassified threads after sync
 - Profile build dispatch if user profile hasn't been calibrated yet
+- **BullMQ job dedup fix:** removes completed jobs before re-adding to prevent stale job conflicts
+
+---
+
+## Metadata-First Sync Architecture
+
+The gateway uses a **metadata-first** approach to Gmail sync, significantly reducing initial sync time and API quota usage.
+
+### How it works
+
+1. **During sync** (`syncRecentThreads`): Gmail threads are fetched with `format: 'metadata'` — only headers (From, To, Cc, Subject) and metadata (dates, labels) are retrieved. Message bodies are **not** fetched. This is 10–50x faster than fetching full content.
+
+2. **On-demand body fetch** (`fetchThreadFull`): When a user views a thread detail or triggers draft generation, the gateway checks if messages have body content. If not, it calls `GmailAdapter.fetchThreadFull(externalThreadId)` which:
+   - Fetches the thread with `format: 'full'` from Gmail API
+   - Extracts `bodyText` and `bodyHtml` from the message payload
+   - Updates existing message rows in DB via `EmailRepository.updateMessageBody()`
+
+3. **Caching**: Once fetched, body content is persisted in the database. Subsequent accesses are instant (no Gmail API call needed).
+
+### Key methods
+
+| Method | Location | Purpose |
+|--------|----------|---------|
+| `syncRecentThreads(maxResults, daysBack, onPageSynced)` | `GmailAdapter` | Fetches thread metadata only, stores headers/participants/dates |
+| `fetchThreadFull(externalThreadId)` | `GmailAdapter` | On-demand full body fetch, updates DB messages |
+| `updateMessageBody(externalMessageId, bodyText, bodyHtml)` | `EmailRepository` | Updates cached body content for a message |
+
+### Smart daysBack optimization
+
+The sync endpoint accepts `daysBack` (1–15, default 7). The Gmail sync worker applies smart optimization:
+- If the database already has synced threads and the last sync was recent, the effective `daysBack` may be reduced internally to only fetch threads since the last sync timestamp
+- This reduces redundant Gmail API calls on frequent syncs
+
+### Where body is fetched before dispatch
+
+- `GET /connections/:type/threads/:id` — fetches body if messages lack content (transparent to client)
+- `POST /connections/:type/threads/:id/draft` — fetches body before dispatching Celery draft task
+- `POST /connections/:type/threads/:id/regenerate` — fetches body before dispatching regeneration task
+- Profile pipeline — sent email bodies fetched before profile build dispatch
 
 ### WebSocket Manager
 

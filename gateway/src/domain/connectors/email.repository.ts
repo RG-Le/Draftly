@@ -192,6 +192,24 @@ export class EmailRepository {
     return this.mapMessage(created);
   }
 
+  /**
+   * Update the body content of an existing message (used by metadata-first on-demand fetch).
+   * Identified by external_message_id (Gmail message ID).
+   * Idempotent — safe to call multiple times.
+   */
+  async updateMessageBody(
+    externalMessageId: string,
+    bodyText: string | null,
+    bodyHtml: string | null,
+  ): Promise<void> {
+    await this.db('email_messages')
+      .where({ external_message_id: externalMessageId })
+      .update({
+        body_text: bodyText,
+        body_html: bodyHtml,
+      });
+  }
+
   // ========== Mappers ==========
 
   private mapThread(row: any): EmailThread {

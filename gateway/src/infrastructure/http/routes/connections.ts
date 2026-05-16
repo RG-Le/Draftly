@@ -110,6 +110,7 @@ connectionsRouter.get('/', requireAuth, userRateLimitMiddleware, async (req: Req
   const result = allConnectors.map((connector) => {
     const conn = userConnections.find((c) => c.connectorType === connector.type);
     return {
+      id: conn?.id || null,
       type: connector.type,
       displayName: connector.displayName,
       category: connector.category,
@@ -338,13 +339,14 @@ connectionsRouter.get('/callback', ipRateLimitMiddleware, async (req: Request, r
 
     logger.info({ userId }, 'Profile bootstrap complete after Gmail connection');
 
-    // Trigger initial sync
+    // Trigger initial sync — fetch ALL emails from last 7 days (no count cap)
     const correlationId = (req as any).correlationId || 'manual';
     await enqueueGmailSync({
       connectionId: connection.id,
       userId,
       correlationId,
-      maxResults: 20,
+      maxResults: 0,  // 0 = no limit, fetch all threads in the time window
+      daysBack: 7,
     });
 
     // Redirect to frontend if a redirect_uri was provided, otherwise return JSON (Postman fallback).
@@ -392,17 +394,22 @@ connectionsRouter.post('/:type/sync', requireAuth, userRateLimitMiddleware, asyn
   }
 
   const correlationId = (req as any).correlationId || 'manual';
+  const rawDaysBack = req.body?.daysBack ?? 7;
+  const daysBack = Math.min(Math.max(parseInt(String(rawDaysBack), 10) || 7, 1), 15);
+
   const jobId = await enqueueGmailSync({
     connectionId: connection.id,
     userId,
     correlationId,
-    maxResults: req.body?.maxResults || 20,
+    maxResults: req.body?.maxResults || 0,  // 0 = no limit, fetch all threads in time window
+    daysBack,
   });
 
   res.json({
     message: 'Sync job queued',
     jobId,
     connectionId: connection.id,
+    daysBack,
   });
 });
 
@@ -501,7 +508,32 @@ connectionsRouter.get('/:type/threads/:id', requireAuth, userRateLimitMiddleware
     throw new NotFoundError('Thread', id);
   }
 
-  const messages = await emailRepo.findMessagesByThread(id);
+  let messages = await emailRepo.findMessagesByThread(id);
+
+  // Metadata-first: if messages exist but have no body content, fetch full thread on-demand
+  const hasBody = messages.some(m => m.bodyText || m.bodyHtml);
+  if (!hasBody && messages.length > 0) {
+    const encryption = new EncryptionService(config.SECRET_ENCRYPTION_KEY);
+    const accessToken = encryption.decrypt(connection.encryptedAccessToken);
+    const refreshToken = encryption.decrypt(connection.encryptedRefreshToken);
+
+    const { GmailAdapter } = await import('../../../domain/connectors/gmail.adapter.js');
+    const adapter = new GmailAdapter(
+      connection.id,
+      userId,
+      encryption,
+      connectionRepo,
+      emailRepo,
+      accessToken,
+      refreshToken,
+      config.GOOGLE_CLIENT_ID,
+      config.GOOGLE_CLIENT_SECRET,
+    );
+
+    await adapter.fetchThreadFull(thread.externalThreadId);
+    // Re-query messages from DB (now with body content)
+    messages = await emailRepo.findMessagesByThread(id);
+  }
 
   res.json({
     thread,
@@ -677,6 +709,30 @@ connectionsRouter.post('/:type/threads/:id/draft', requireAuth, userRateLimitMid
     throw new NotFoundError('Thread', id);
   }
 
+  // Metadata-first: ensure full body is available before dispatching draft generation
+  const messages = await emailRepo.findMessagesByThread(id);
+  const hasBody = messages.some(m => m.bodyText || m.bodyHtml);
+  if (!hasBody && messages.length > 0) {
+    const encryption = new EncryptionService(config.SECRET_ENCRYPTION_KEY);
+    const accessToken = encryption.decrypt(connection.encryptedAccessToken);
+    const refreshToken = encryption.decrypt(connection.encryptedRefreshToken);
+
+    const { GmailAdapter } = await import('../../../domain/connectors/gmail.adapter.js');
+    const adapter = new GmailAdapter(
+      connection.id,
+      userId,
+      encryption,
+      connectionRepo,
+      emailRepo,
+      accessToken,
+      refreshToken,
+      config.GOOGLE_CLIENT_ID,
+      config.GOOGLE_CLIENT_SECRET,
+    );
+
+    await adapter.fetchThreadFull(thread.externalThreadId);
+  }
+
   const correlationId = (req as any).correlationId || `manual-draft-${id}`;
   const redis = getRedis();
   const { CeleryBridge } = await import('../../workers/celery-bridge.js');
@@ -754,6 +810,7 @@ connectionsRouter.put('/:type/threads/:id/draft', requireAuth, userRateLimitMidd
   });
 
   // Sync the updated content to Gmail draft
+  const { enqueueDraftSync } = await import('../../workers/draft-sync.worker.js');
   if (draft.external_draft_id) {
     await enqueueDraftSync({
       draftId: draft.id,
@@ -761,6 +818,15 @@ connectionsRouter.put('/:type/threads/:id/draft', requireAuth, userRateLimitMidd
       userId,
       correlationId: `edit-sync-${draft.id}`,
       action: 'update',
+    });
+  } else {
+    // First time syncing — create a new Gmail draft
+    await enqueueDraftSync({
+      draftId: draft.id,
+      threadId: id,
+      userId,
+      correlationId: `edit-create-${draft.id}`,
+      action: 'create',
     });
   }
 
@@ -903,6 +969,111 @@ connectionsRouter.post('/:type/threads/:id/reject', requireAuth, userRateLimitMi
   res.json({
     status: 'rejected',
     message: 'Draft has been rejected',
+  });
+});
+
+// ============================================================================
+// POST /connections/:type/threads/:id/regenerate — Regenerate the draft
+// ============================================================================
+connectionsRouter.post('/:type/threads/:id/regenerate', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {
+  const userId = (req as any).user.id;
+  const type = req.params.type as string;
+  const id = req.params.id as string;
+
+  const db = getDatabase();
+  const connectionRepo = new ConnectionRepository(db);
+  const connection = await connectionRepo.findByUserAndType(userId, type);
+
+  if (!connection) {
+    throw new NotFoundError('Connection', type);
+  }
+
+  const { EmailRepository } = await import('../../../domain/connectors/email.repository.js');
+  const emailRepo = new EmailRepository(db);
+
+  const thread = await emailRepo.findThreadById(id);
+  if (!thread || thread.connectionId !== connection.id) {
+    throw new NotFoundError('Thread', id);
+  }
+
+  const draft = await emailRepo.findLatestDraftByThreadId(id);
+  if (!draft) {
+    throw new NotFoundError('Draft for thread', id);
+  }
+
+  if (draft.status === 'sent') {
+    res.status(409).json({ error: { code: 'CONFLICT', message: 'Cannot regenerate a sent draft' } });
+    return;
+  }
+  if (draft.status === 'approved') {
+    res.status(409).json({ error: { code: 'CONFLICT', message: 'Cannot regenerate an approved draft. Reject it first.' } });
+    return;
+  }
+
+  // Metadata-first: ensure full body is available before dispatching draft regeneration
+  const messages = await emailRepo.findMessagesByThread(id);
+  const hasBody = messages.some(m => m.bodyText || m.bodyHtml);
+  if (!hasBody && messages.length > 0) {
+    const encryption = new EncryptionService(config.SECRET_ENCRYPTION_KEY);
+    const accessToken = encryption.decrypt(connection.encryptedAccessToken);
+    const refreshToken = encryption.decrypt(connection.encryptedRefreshToken);
+
+    const { GmailAdapter } = await import('../../../domain/connectors/gmail.adapter.js');
+    const adapter = new GmailAdapter(
+      connection.id,
+      userId,
+      encryption,
+      connectionRepo,
+      emailRepo,
+      accessToken,
+      refreshToken,
+      config.GOOGLE_CLIENT_ID,
+      config.GOOGLE_CLIENT_SECRET,
+    );
+
+    await adapter.fetchThreadFull(thread.externalThreadId);
+  }
+
+  // Reset draft status
+  await db('drafts').where({ id: draft.id }).update({
+    status: 'regenerating',
+    external_draft_id: null,
+    updated_at: new Date(),
+  });
+
+  // Record the action
+  await db('draft_actions').insert({
+    draft_id: draft.id,
+    user_id: userId,
+    action_type: 'regenerate',
+    metadata: JSON.stringify({ previous_version: draft.version }),
+  });
+
+  // Delete old Gmail draft if exists
+  if (draft.external_draft_id) {
+    await enqueueDraftSync({
+      draftId: draft.id,
+      threadId: id,
+      userId,
+      correlationId: `regen-delete-${draft.id}`,
+      action: 'delete',
+    });
+  }
+
+  // Dispatch new draft generation via CeleryBridge
+  const { CeleryBridge } = await import('../../workers/celery-bridge.js');
+  const redis = (await import('../../redis/connection.js')).getRedis();
+  const celeryBridge = new CeleryBridge(redis);
+  const taskId = await celeryBridge.dispatchDraftTask({
+    threadId: id,
+    userId,
+    correlationId: `regenerate-${draft.id}`,
+  });
+
+  res.json({
+    status: 'regenerating',
+    message: 'Draft regeneration queued',
+    taskId,
   });
 });
 

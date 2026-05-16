@@ -244,6 +244,8 @@ textarea {
   grid-template-columns: 260px 1fr;
   width: 100%;
   overflow-x: hidden;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .app-sidebar {
@@ -255,6 +257,7 @@ textarea {
   padding: 1.35rem;
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, #f7efe3 0%, #efe3d2 100%);
+  overflow-y: auto;
 }
 
 .brand h1 {
@@ -306,6 +309,8 @@ textarea {
 .app-main {
   padding: 1.2rem;
   min-width: 0;
+  overflow-y: auto;
+  height: 100vh;
   overflow-x: hidden;
 }
 
@@ -731,6 +736,7 @@ th {
 .preference-item {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 0.75rem;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -744,6 +750,23 @@ th {
 .preference-item p {
   color: var(--muted);
   font-size: 0.85rem;
+  margin: 0;
+}
+
+.triage-categories-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.triage-categories-list .preference-item {
+  padding: 0.85rem 1rem;
+}
+
+/* Custom instructions textarea - larger */
+.profile-form textarea {
+  min-height: 120px;
+  width: 100%;
+  resize: vertical;
 }
 
 .month-picker {
@@ -952,4 +975,93 @@ th {
   .draft-editor-actions .btn {
     width: 100%;
   }
+}
+
+/* Dialog */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog-box {
+  background: white;
+  border-radius: 16px;
+  padding: 1.5rem;
+  max-width: 480px;
+  width: 90%;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+.dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.dialog-header h3 {
+  font-family: 'Newsreader', serif;
+  font-size: 1.3rem;
+  margin: 0;
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+}
+
+.dialog-close:hover {
+  background: var(--border);
+}
+
+.dialog-body {
+  display: grid;
+  gap: 1rem;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--border);
+  margin-top: 0.5rem;
+}
+
+.pagination-btn {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background: #f7efe3;
+  border-color: var(--accent);
+}
+
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pagination-info {
+  font-size: 0.85rem;
+  color: var(--muted);
 }

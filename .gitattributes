@@ -1,0 +1,19 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Force LF for files that break with CRLF
+*.sh text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf
+Dockerfile.dev text eol=lf
+docker-compose*.yml text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+
+# Force CRLF for Windows-specific scripts
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

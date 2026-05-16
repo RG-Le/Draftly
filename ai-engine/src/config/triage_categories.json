@@ -6,6 +6,11 @@
       "description": "The email expects a response or action from the user (e.g., questions, meeting requests, action items, direct conversations)."
     },
     {
+      "id": "already_replied",
+      "label": "Already Replied",
+      "description": "The user has already sent a reply in this thread after the last incoming message addressed to them."
+    },
+    {
       "id": "promotions",
       "label": "Promotions",
       "description": "Marketing emails, deals, newsletters, offers, or broadcast content from companies or services."
@@ -14,6 +19,11 @@
       "id": "info",
       "label": "Info (FYI)",
       "description": "Informational notifications, receipts, shipping updates, order confirmations, automated alerts, system notifications — no response needed."
+    },
+    {
+      "id": "junk",
+      "label": "Junk",
+      "description": "Spam, irrelevant content, or unsolicited messages with no value."
     }
   ],
   "default_fallback": "info"

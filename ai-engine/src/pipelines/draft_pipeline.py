@@ -5,7 +5,7 @@ from sqlalchemy import select
 from jinja2 import Template
 
 from src.pipelines.base import Pipeline, Stage, PipelineContext
-from src.infrastructure.database.models import EmailThread, EmailMessage, Draft, UserProfile
+from src.infrastructure.database.models import EmailThread, EmailMessage, Draft, UserProfile, User
 from src.config.database import get_session_factory
 from src.infrastructure.llm.llm_service import LLMService
 from src.infrastructure.llm.prompt_manager import PromptManager
@@ -25,6 +25,13 @@ class LoadThreadHistoryStage(Stage):
                 raise ValueError(f"No messages found for thread {ctx.thread_id}")
                 
             ctx.data['messages'] = list(messages)
+
+            # Load user's email address for context labeling
+            user_stmt = select(User.email).where(User.id == ctx.user_id)
+            user_result = await session.execute(user_stmt)
+            user_email = user_result.scalar_one_or_none()
+            ctx.data['user_email'] = user_email
+
         return ctx
 
 class LoadUserProfileStage(Stage):
@@ -44,16 +51,26 @@ class FormatContextStage(Stage):
     """Formats messages and user profile into a readable context for the LLM."""
     async def process(self, ctx: PipelineContext) -> PipelineContext:
         messages = ctx.data['messages']
+        user_email = ctx.data.get('user_email')
         
         # Build chronological message history
         context_blocks = []
+        reply_to_sender = None
         for msg in messages:
             sender = msg.from_address or 'Unknown'
             date = msg.received_at.strftime("%Y-%m-%d %H:%M") if msg.received_at else "Unknown Date"
             body = msg.body_text or "[Blank Email]"
-            context_blocks.append(f"--- On {date}, {sender} wrote ---\n{body}")
+            
+            if msg.is_sent_by_user:
+                context_blocks.append(f"--- On {date}, [YOU replied] ---\n{body}")
+            else:
+                context_blocks.append(f"--- On {date}, {sender} wrote ---\n{body}")
+                # Track the last incoming message (not from user)
+                reply_to_sender = sender
             
         ctx.data['thread_context'] = "\n\n".join(context_blocks)
+        ctx.data['reply_to_sender'] = reply_to_sender or "Unknown"
+        
         # truncate extremely long threads
         if len(ctx.data['thread_context']) > 6000:
             ctx.data['thread_context'] = "..." + ctx.data['thread_context'][-6000:]
@@ -77,9 +94,10 @@ class FormatContextStage(Stage):
                 persona_parts.append(f"Writing style instructions: {profile.personalized_profile}")
             if profile.signature_template:
                 persona_parts.append(f"Signature: {profile.signature_template}")
+            persona_parts.append(f"Reply to: {ctx.data['reply_to_sender']}")
             ctx.data['persona_context'] = "\n".join(persona_parts)
         else:
-            ctx.data['persona_context'] = "No user profile available. Use a professional, concise tone."
+            ctx.data['persona_context'] = f"No user profile available. Use a professional, concise tone.\nReply to: {ctx.data['reply_to_sender']}"
             
         return ctx
 
@@ -98,13 +116,22 @@ class LLMDraftGenerationStage(Stage):
         
         user_prompt = user_template.render(
             thread_context=ctx.data['thread_context'],
-            persona_context=ctx.data.get('persona_context', '')
+            persona_context=ctx.data.get('persona_context', ''),
+            reply_to_sender=ctx.data.get('reply_to_sender', 'Unknown'),
+            user_email=ctx.data.get('user_email', 'the user')
         )
         
         # Generate Draft
         content, metrics = await self.llm_service.generate(system_prompt, user_prompt)
         
         ctx.usage.add(metrics['input_tokens'], metrics['output_tokens'], metrics['cost'])
+        
+        # Check if LLM indicates no reply is needed
+        if "[NO_REPLY_NEEDED]" in content:
+            ctx.data["draft_content"] = None
+            ctx.data["no_reply_needed"] = True
+            ctx.should_stop = True
+            return ctx
         
         ctx.data['draft_content'] = content
         ctx.data['llm_metadata'] = metrics

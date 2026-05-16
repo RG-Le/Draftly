@@ -18,7 +18,9 @@ function mapProfile(raw: any): ProfileData {
     communicationNorms: raw.communicationNorms || raw.communication_norms,
     profileVersion: raw.profileVersion || raw.profile_version,
     confidenceScore: raw.confidenceScore || raw.confidence_score,
-    lastCalibratedAt: raw.lastCalibratedAt || raw.last_calibrated_at || null
+    lastCalibratedAt: raw.lastCalibratedAt || raw.last_calibrated_at || null,
+    profileSource: raw.profileSource || raw.profile_source || 'default',
+    isAiGenerated: raw.isAiGenerated ?? raw.is_ai_generated ?? false
   };
 }
 
@@ -128,4 +130,40 @@ export async function updateAutoSyncPreference(data: { enabled: boolean; interva
     }
     throw error;
   }
+}
+
+export async function regenerateProfile(): Promise<void> {
+  await apiRequest({
+    path: '/api/v1/profile/regenerate',
+    method: 'POST',
+    body: {}
+  });
+}
+
+// ── Triage Preferences ────────────────────────────────────────────────────────
+
+export async function getTriagePreferences(): Promise<{ customInstructions: string | null }> {
+  try {
+    const payload = await apiRequest<any>({
+      path: '/api/v1/preferences/triage',
+      method: 'GET'
+    });
+    return {
+      customInstructions: payload.customInstructions ?? null
+    };
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      return { customInstructions: null };
+    }
+    throw error;
+  }
+}
+
+export async function updateTriagePreferences(data: { customInstructions: string }): Promise<any> {
+  const payload = await apiRequest<any>({
+    path: '/api/v1/preferences/triage',
+    method: 'PUT',
+    body: { customInstructions: data.customInstructions }
+  });
+  return payload;
 }

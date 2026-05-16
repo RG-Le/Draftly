@@ -28,6 +28,7 @@ class UserProfile(Base):
     current_priorities = Column(JSON)
     profile_version = Column(Integer, default=1, nullable=False)
     confidence_score = Column(Numeric(3, 2), default=0.0)
+    profile_source = Column(String(20), nullable=False, default='default')
     last_calibrated_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

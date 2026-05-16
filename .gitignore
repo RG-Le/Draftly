@@ -19,6 +19,9 @@ dist/
 # Keys (generated, not committed)
 keys/
 
+# workflows (for now)
+.github/
+
 # IDE
 .vscode/
 .idea/

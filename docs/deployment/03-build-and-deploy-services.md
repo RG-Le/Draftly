@@ -181,13 +181,23 @@ Secrets (click "Reference a Secret"):
 **Networking tab:**
 - Ingress: **All**
 - VPC connector: `draftly-connector`
-- Route all traffic through VPC connector: **Yes**
+- VPC egress: **"Route only requests to private IPs through the VPC connector"**
+  > ⚠️ Do NOT choose "Route all traffic". The Gateway needs to reach Google OAuth APIs and other
+  > external services. "Private IPs only" routes DB/Redis traffic through the VPC while all other
+  > outbound traffic goes directly to the internet — no Cloud NAT needed.
 
 7. Click **"Create"**
 
 Wait for deployment. Note the service URL (e.g., `https://draftly-gateway-abc123.run.app`).
 
 ### 6b: Deploy AI Worker
+
+> **Architecture note:** The AI worker is queue-driven — it pulls jobs from Redis (BullMQ),
+> makes outbound calls to PostgreSQL (Cloud SQL private IP), OpenRouter/Gemini LLM APIs
+> (internet), and Google Gmail API (internet). It does **not** receive inbound HTTP from the
+> internet. Networking must be configured accordingly:
+> - **Ingress = Internal** → blocks unsolicited inbound HTTP (correct; the worker is not an HTTP server for external traffic)
+> - **VPC Egress = Private IPs only** → routes only `10.x.x.x` DB/Redis traffic through the VPC connector; all other outbound traffic (OpenRouter, Gmail, etc.) exits directly to the internet without needing Cloud NAT
 
 1. Go to **Cloud Run** → **"Create Service"**
 2. **Container image:** `us-central1-docker.pkg.dev/PROJECT_ID/draftly/ai-engine:latest`
@@ -197,37 +207,54 @@ Wait for deployment. Note the service URL (e.g., `https://draftly-gateway-abc123
 
 **Container tab:**
 - Container port: `8080`
-- **Command:** `celery`
-- **Arguments:** `-A`, `src.celery_app`, `worker`, `--loglevel=info`, `--concurrency=4`, `--queues=triage-queue,draft-queue,profile-queue`
+- **Command:** (leave blank — uses the image's `start.sh` entrypoint)
+- Add environment variable: `DRAFTLY_ROLE` = `worker` (this tells `start.sh` to launch Celery)
 - CPU: `2`
 - Memory: `1 GiB`
 - Request timeout: `3600`
 - Min instances: `1`
 - Max instances: `3`
 
+> **Why leave Command blank?** The `ai-engine/start.sh` entrypoint reads `DRAFTLY_ROLE`:
+> - `worker` → starts uvicorn health server in background + launches Celery worker (correct for Cloud Run, which requires a process to bind the health-check port)
+> - `api` → starts only uvicorn (for the standalone api service if needed)
+
 **Variables & Secrets tab:**
 
 Environment variables:
 | Name | Value |
 |------|-------|
+| `DRAFTLY_ROLE` | `worker` |
 | `DB_HOST` | `10.0.0.2` (Cloud SQL private IP) |
 | `DB_PORT` | `5432` |
 | `DB_NAME` | `draftly` |
 | `DB_USER` | `draftly` |
 | `REDIS_URL` | `redis://10.0.0.3:6379` (Memorystore IP) |
-| `LLM_PRIMARY_MODEL` | `gemini/gemini-2.0-flash` |
+| `LLM_PRIMARY_MODEL` | `gemini/gemini-2.0-flash` (or whichever model you're using) |
 | `LLM_FALLBACK_MODEL` | `gemini/gemini-1.5-flash` |
+| `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` (if using OpenRouter) |
+| `CELERY_QUEUES` | `triage-queue,draft-queue,profile-queue` |
+| `CELERY_CONCURRENCY` | `4` |
 
-Secrets:
+Secrets (click "Reference a Secret"):
 | Name | Secret | Version |
 |------|--------|---------|
-| `GEMINI_API_KEY` | `draftly-gemini-api-key` | latest |
+| `OPENAI_API_KEY` | `draftly-openrouter-api-key` | latest |
 | `DB_PASSWORD` | `draftly-db-password` | latest |
 
 **Networking tab:**
-- Ingress: **Internal only**
+- Ingress: **Internal**
+  > This controls *inbound* HTTP traffic to this Cloud Run service's URL only.
+  > It does **not** block the worker's *outbound* calls to external APIs.
+  > "Internal" is correct here — no external party should be able to invoke this service's HTTP endpoint directly.
 - VPC connector: `draftly-connector`
-- Route all traffic through VPC connector: **Yes**
+- VPC egress: **"Route only requests to private IPs through the VPC connector"** ← **CRITICAL**
+  > ⚠️ This setting controls *outbound* traffic routing:
+  > - `10.x.x.x` (Cloud SQL, Memorystore) → routed through the VPC connector ✅
+  > - `openrouter.ai`, `generativelanguage.googleapis.com`, `gmail.googleapis.com` → exit directly to internet ✅
+  >
+  > **Do NOT select "Route all traffic through VPC connector"** — your VPC has no Cloud NAT,
+  > so all internet-bound traffic would be dropped, breaking LLM calls and Gmail API calls.
 
 6. Click **"Create"**
 

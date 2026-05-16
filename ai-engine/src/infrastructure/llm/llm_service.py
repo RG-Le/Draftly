@@ -10,6 +10,7 @@ logger = structlog.get_logger()
 
 # We need to drop unknown kwargs if litellm doesn't support them for a provider
 litellm.drop_params = True
+litellm.ssl_verify = False  # Handle environments with SSL interception (corporate proxies, Docker)
 
 class LLMService:
     def __init__(self):
@@ -79,7 +80,8 @@ class LLMService:
             "model": "mock_fallback",
             "input_tokens": 0,
             "output_tokens": 0,
-            "cost": 0.0
+            "cost": 0.0,
+            "latency_ms": 0
         }
         
         if response_format:
@@ -90,6 +92,10 @@ class LLMService:
                     "classification": "reply_needed", 
                     "confidence": 0.9, 
                     "reasoning": "Mocked LLM due to permissions"
+                })
+            elif response_format.__name__ == 'BatchTriageResponse':
+                mock_content = json.dumps({
+                    "results": [{"thread_index": 0, "classification": "reply_needed", "confidence": 0.5, "reasoning": "Mock fallback"}]
                 })
             else:
                 mock_content = json.dumps({}) # Catch all for other models

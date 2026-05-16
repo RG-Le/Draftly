@@ -56,56 +56,231 @@ export class GmailAdapter {
   }
 
   /**
-   * Fetch recent threads (up to maxResults) and store them.
-   * Returns the number of new/updated threads.
+   * Fetch recent threads page-by-page and store them.
+   *
+   * @param maxResults     Total threads to sync (caps the loop).
+   * @param daysBack       Only fetch threads from the last N days (1–15). 0 = no date filter.
+   * @param onPageSynced   Called after each page is saved to DB with the DB UUIDs of saved threads.
+   *                       Use this to dispatch triage per-page so classifications start while Gmail
+   *                       is still being fetched (rather than waiting for all threads to finish).
+   *
+   * Within each page, thread detail calls are made IN PARALLEL (capped at 20 per page) which
+   * reduces fetch time from O(n × serial_latency) to O(pages × max_latency_per_page).
    */
-  async syncRecentThreads(maxResults = 20): Promise<{ synced: number; messages: number }> {
+  async syncRecentThreads(
+    maxResults = 20,
+    daysBack = 1,
+    onPageSynced?: (dbThreadIds: string[]) => Promise<void>,
+  ): Promise<{ synced: number; messages: number }> {
     let synced = 0;
     let totalMessages = 0;
 
-    const listRes = await this.gmail.users.threads.list({
-      userId: 'me',
-      maxResults,
-      q: 'in:inbox',
-    });
+    const queryParts = ['in:inbox'];
+    if (daysBack > 0) {
+      const afterEpochSeconds = Math.floor((Date.now() - daysBack * 86_400_000) / 1000);
+      queryParts.push(`after:${afterEpochSeconds}`);
+    }
+    const q = queryParts.join(' ');
 
-    const threads = listRes.data.threads || [];
+    let pageToken: string | undefined;
+    const processedGmailIds = new Set<string>();
 
-    for (const threadStub of threads) {
-      if (!threadStub.id) continue;
+    do {
+      // Fetch at most 20 stubs per page — we parallelise detail calls within each page,
+      // and Gmail's default quota is 250 units/s; threads.get costs 5 units so 20 parallel
+      // calls = 100 units, well within quota.
+      // maxResults=0 means no limit (fetch all threads in the time window)
+      const pageSize = maxResults > 0 ? Math.min(maxResults - synced, 20) : 20;
+      if (pageSize <= 0) break;
 
-      try {
-        const threadRes = await this.gmail.users.threads.get({
-          userId: 'me',
-          id: threadStub.id,
-          format: 'full',
-        });
+      const listRes = await this.gmail.users.threads.list({
+        userId: 'me',
+        maxResults: pageSize,
+        q,
+        ...(pageToken ? { pageToken } : {}),
+      });
 
-        const threadData = threadRes.data;
+      const stubs = (listRes.data.threads || []).filter(
+        (s) => s.id && !processedGmailIds.has(s.id),
+      );
+      if (stubs.length === 0) break;
+      stubs.forEach((s) => processedGmailIds.add(s.id!));
+
+      // Fetch thread METADATA only for this page IN PARALLEL (10-50x faster than 'full')
+      // Body content is fetched on-demand later when needed (thread view, draft generation)
+      const detailResults = await Promise.allSettled(
+        stubs.map((stub) =>
+          this.gmail.users.threads.get({ userId: 'me', id: stub.id!, format: 'metadata' }),
+        ),
+      );
+
+      const pageDbThreadIds: string[] = [];
+
+      for (let i = 0; i < detailResults.length; i++) {
+        const result = detailResults[i];
+        if (result.status === 'rejected') {
+          logger.warn({ threadId: stubs[i].id, error: result.reason?.message }, 'Failed to fetch thread detail, skipping');
+          continue;
+        }
+
+        const threadData = result.value.data;
         const messages = threadData.messages || [];
         const firstMessage = messages[0];
         const lastMessage = messages[messages.length - 1];
 
-        // Extract subject & participants
         const subject = this.getHeader(firstMessage, 'Subject');
         const participants = this.extractParticipants(messages);
         const lastMessageAt = lastMessage?.internalDate
           ? new Date(parseInt(lastMessage.internalDate, 10))
           : null;
 
-        // Upsert thread
+        try {
+          const dbThread = await this.emailRepo.upsertThread({
+            connectionId: this.connectionId,
+            externalThreadId: stubs[i].id!,
+            subject,
+            participants,
+            messageCount: messages.length,
+            lastMessageAt,
+            syncStatus: 'synced',
+          });
+          synced++;
+          pageDbThreadIds.push(dbThread.id);
+
+          for (const msg of messages) {
+            if (!msg.id) continue;
+
+            const fromHeader = this.getHeader(msg, 'From') || '';
+            const toHeader = this.getHeader(msg, 'To') || '';
+            const ccHeader = this.getHeader(msg, 'Cc');
+            const msgSubject = this.getHeader(msg, 'Subject');
+            const receivedAt = msg.internalDate ? new Date(parseInt(msg.internalDate, 10)) : new Date();
+            const labels = msg.labelIds || [];
+            const isSentByUser = labels.includes('SENT');
+
+            // Metadata-first: body is NOT available in metadata format.
+            // It will be fetched on-demand via fetchThreadFull() when needed
+            // (thread detail view or draft generation).
+            await this.emailRepo.createMessage({
+              threadId: dbThread.id,
+              externalMessageId: msg.id,
+              fromAddress: fromHeader,
+              toAddresses: this.parseAddressList(toHeader),
+              ccAddresses: ccHeader ? this.parseAddressList(ccHeader) : null,
+              subject: msgSubject,
+              bodyText: null,
+              bodyHtml: null,
+              rawHeaders: null,
+              receivedAt,
+              isSentByUser,
+            });
+            totalMessages++;
+          }
+        } catch (err: any) {
+          logger.warn({ threadId: stubs[i].id, error: err.message }, 'Failed to save thread, skipping');
+        }
+      }
+
+      // Fire per-page triage dispatch so Celery can start classifying immediately
+      // rather than waiting for ALL pages to finish
+      if (onPageSynced && pageDbThreadIds.length > 0) {
+        await onPageSynced(pageDbThreadIds);
+      }
+
+      pageToken = listRes.data.nextPageToken ?? undefined;
+    } while (pageToken && (maxResults === 0 || synced < maxResults));
+
+    return { synced, messages: totalMessages };
+  }
+
+  /**
+   * Fetch the full thread body from Gmail and update existing messages in DB.
+   *
+   * This is the on-demand body fetch used by the metadata-first sync architecture.
+   * Called when a user views a thread detail or before draft generation.
+   * Idempotent — safe to call multiple times (will overwrite body content).
+   *
+   * @param externalThreadId  The Gmail thread ID (not our internal UUID)
+   * @returns The number of messages updated with body content
+   */
+  async fetchThreadFull(externalThreadId: string): Promise<number> {
+    logger.info({ externalThreadId }, 'Fetching full thread body on-demand');
+
+    const res = await this.gmail.users.threads.get({
+      userId: 'me',
+      id: externalThreadId,
+      format: 'full',
+    });
+
+    const messages = res.data.messages || [];
+    let updated = 0;
+
+    for (const msg of messages) {
+      if (!msg.id) continue;
+
+      const { bodyText, bodyHtml } = this.extractBody(msg.payload);
+
+      // Only update if we actually got body content
+      if (bodyText || bodyHtml) {
+        await this.emailRepo.updateMessageBody(msg.id, bodyText, bodyHtml);
+        updated++;
+      }
+    }
+
+    logger.info({ externalThreadId, messagesUpdated: updated }, 'Full thread body fetched and saved');
+    return updated;
+  }
+
+  /**
+   * Fetch the latest sent emails directly from Gmail, ignoring the date sync window.
+   * This is used to bootstrap the AI profile generation if the user hasn't sent any emails
+   * within the default 7-day sync window.
+   * @param maxResults Number of sent threads to fetch
+   */
+  async fetchLatestSentEmails(maxResults = 5): Promise<number> {
+    logger.info({ connectionId: this.connectionId }, 'Fetching latest sent emails for profile generation');
+    const listRes = await this.gmail.users.threads.list({
+      userId: 'me',
+      maxResults,
+      q: 'in:sent',
+    });
+
+    const stubs = listRes.data.threads || [];
+    if (stubs.length === 0) return 0;
+
+    let totalMessages = 0;
+
+    for (const stub of stubs) {
+      if (!stub.id) continue;
+      
+      try {
+        const res = await this.gmail.users.threads.get({
+          userId: 'me',
+          id: stub.id,
+          format: 'full',
+        });
+
+        const threadData = res.data;
+        const messages = threadData.messages || [];
+        const firstMessage = messages[0];
+        const lastMessage = messages[messages.length - 1];
+
+        const subject = this.getHeader(firstMessage, 'Subject');
+        const participants = this.extractParticipants(messages);
+        const lastMessageAt = lastMessage?.internalDate
+          ? new Date(parseInt(lastMessage.internalDate, 10))
+          : null;
+
         const dbThread = await this.emailRepo.upsertThread({
           connectionId: this.connectionId,
-          externalThreadId: threadStub.id,
+          externalThreadId: stub.id,
           subject,
           participants,
           messageCount: messages.length,
           lastMessageAt,
           syncStatus: 'synced',
         });
-        synced++;
 
-        // Upsert individual messages
         for (const msg of messages) {
           if (!msg.id) continue;
 
@@ -114,11 +289,9 @@ export class GmailAdapter {
           const ccHeader = this.getHeader(msg, 'Cc');
           const msgSubject = this.getHeader(msg, 'Subject');
           const receivedAt = msg.internalDate ? new Date(parseInt(msg.internalDate, 10)) : new Date();
-
-          // Determine if sent by user (check SENT label)
           const labels = msg.labelIds || [];
           const isSentByUser = labels.includes('SENT');
-
+          
           const { bodyText, bodyHtml } = this.extractBody(msg.payload);
 
           await this.emailRepo.createMessage({
@@ -128,23 +301,24 @@ export class GmailAdapter {
             toAddresses: this.parseAddressList(toHeader),
             ccAddresses: ccHeader ? this.parseAddressList(ccHeader) : null,
             subject: msgSubject,
-            bodyText,
-            bodyHtml,
-            rawHeaders: null, // Don't store raw headers to save space
+            bodyText: bodyText,
+            bodyHtml: bodyHtml,
+            rawHeaders: null,
             receivedAt,
             isSentByUser,
           });
+          
+          if (isSentByUser && (bodyText || bodyHtml)) {
+             // Ensure the body is updated if the message stub already existed without a body
+             await this.emailRepo.updateMessageBody(msg.id, bodyText, bodyHtml);
+          }
           totalMessages++;
         }
       } catch (err: any) {
-        logger.warn(
-          { threadId: threadStub.id, error: err.message },
-          'Failed to sync thread, skipping',
-        );
+        logger.warn({ threadId: stub.id, error: err.message }, 'Failed to save sent thread, skipping');
       }
     }
-
-    return { synced, messages: totalMessages };
+    return totalMessages;
   }
 
   /**

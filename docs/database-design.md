@@ -77,11 +77,12 @@ erDiagram
 | closing_style | jsonb | | e.g., `{"formal": true, "common_phrases": ["Best regards", "Thanks"]}` |
 | signature_template | text | | Full signature block |
 | personalized_profile | text | | AI-generated writing style description |
-| preferred_tone | varchar(50) | | 'professional', 'friendly', 'concise' |
+| preferred_tone | varchar(50) | | 'professional', 'friendly', 'concise', 'formal', 'casual' |
 | communication_norms | jsonb | | Patterns observed from sent emails |
 | current_priorities | jsonb | | Inferred from recent threads |
 | profile_version | integer | NOT NULL, DEFAULT 1 | Incremented on update |
 | confidence_score | decimal(3,2) | DEFAULT 0.0 | 0.0 to 1.0 |
+| profile_source | varchar(20) | DEFAULT 'default' | 'default' or 'ai_generated' |
 | last_calibrated_at | timestamptz | | Last time sent emails were analyzed |
 | created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 | updated_at | timestamptz | NOT NULL, DEFAULT NOW() | |
@@ -139,7 +140,7 @@ UNIQUE constraint: `(connection_id, external_thread_id)`
 |--------|------|-------------|-------|
 | id | uuid (v7) | PK | |
 | thread_id | uuid | FK → email_threads, UNIQUE, NOT NULL | One result per thread |
-| classification | varchar(50) | NOT NULL | 'reply_needed', 'promotions', 'info', 'junk' (configurable via triage_categories.json) |
+| classification | varchar(50) | NOT NULL | 'reply_needed', 'already_replied', 'promotions', 'info', 'junk' (configurable via triage_categories.json) |
 | method | varchar(20) | NOT NULL | 'heuristic', 'llm', 'batch_llm' |
 | confidence | decimal(3,2) | | 0.0 to 1.0 |
 | reasoning | text | | LLM's explanation or heuristic rule matched |

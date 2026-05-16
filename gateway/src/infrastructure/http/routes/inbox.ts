@@ -12,7 +12,8 @@ export const inboxRouter = Router();
 inboxRouter.get('/', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {
   const userId = (req as any).user.id;
   const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
-  const offset = parseInt(req.query.offset as string) || 0;
+  const page = parseInt(req.query.page as string) || 1;
+  const offset = parseInt(req.query.offset as string) || (page - 1) * limit;
   const categoryFilter = req.query.category as string | undefined;
 
   const db = getDatabase();

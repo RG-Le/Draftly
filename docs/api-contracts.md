@@ -167,6 +167,23 @@ Invalidate refresh token.
 | Rate limit | User rate limit |
 | Response | 204 |
 
+### `DELETE /api/v1/auth/me`
+
+Permanently delete the authenticated user's account. Cascades all related data (connections, threads, messages, triage results, drafts, profiles, preferences, usage records, draft actions). Refresh tokens are revoked from Redis before the account row is deleted.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "message": "Account deleted. All data has been permanently removed."
+}
+```
+
+Returns 404 if user not found.
+
 ---
 
 ## Connection Endpoints
@@ -184,6 +201,7 @@ List all connectors and user's connection status.
 {
   "connectors": [
     {
+      "id": "uuid-or-null",
       "type": "gmail",
       "displayName": "Gmail",
       "category": "email",
@@ -197,6 +215,8 @@ List all connectors and user's connection status.
   ]
 }
 ```
+
+> **Note:** The `id` field is the internal connection UUID (or `null` if the user has not connected this connector type). Used by the frontend for disconnect and sync operations.
 
 ### `GET /api/v1/connections/connect/:type`
 
@@ -263,13 +283,20 @@ Trigger manual inbox sync.
 |---|---|
 | Auth | JWT |
 | Rate limit | User rate limit |
-| Body | `{ "maxResults": 20 }` (optional) |
+| Body | `{ "daysBack": 7, "maxResults": 0 }` (optional) |
+
+**Body parameters:**
+- `daysBack` (optional, integer 1–15, default 7) — How many days back to fetch emails. Clamped to range [1, 15].
+- `maxResults` (optional, integer, default 0) — Maximum threads to sync. `0` means unlimited (fetch all threads in the time window).
+
+**Smart optimization:** If the database already has synced data and the last sync was recent, the gateway may internally reduce `daysBack` to only fetch since the last sync timestamp, reducing Gmail API calls.
 
 ```json
 {
   "message": "Sync job queued",
   "jobId": "gmail-sync-uuid",
-  "connectionId": "uuid"
+  "connectionId": "uuid",
+  "daysBack": 7
 }
 ```
 
@@ -338,6 +365,8 @@ Thread detail with full message history.
 | Auth | JWT |
 | Rate limit | User rate limit |
 
+**On-demand body fetch (metadata-first architecture):** If messages were synced with metadata-only (no `bodyText`/`bodyHtml`), this endpoint automatically fetches the full thread body from Gmail API before returning. The first access may take 1–2 seconds extra; subsequent accesses are instant because the body is cached in the database.
+
 ```json
 {
   "thread": {
@@ -389,7 +418,7 @@ Returns `{ "status": "pending_or_missing" }` if not yet classified.
 
 ### `POST /api/v1/connections/:type/threads/:id/triage`
 
-Trigger manual re-triage (deletes existing result and re-classifies).
+Trigger manual re-triage. Deletes existing triage result and dispatches a fresh classification via Celery.
 
 | | |
 |---|---|
@@ -442,7 +471,7 @@ Returns `{ "status": "not_generated" }` if no draft exists.
 
 ### `POST /api/v1/connections/:type/threads/:id/draft`
 
-Trigger manual draft generation.
+Trigger manual draft generation. If messages have no body content (metadata-first sync), the gateway fetches the full thread body from Gmail API before dispatching the Celery draft generation task.
 
 | | |
 |---|---|
@@ -590,7 +619,7 @@ Returns `{ "exists": false, "profile": null, "message": "..." }` if no profile e
 
 ### `PUT /api/v1/profile`
 
-Update profile fields (partial update). Accepts both camelCase and snake_case field names.
+Update profile fields (partial update). Accepts both camelCase and snake_case field names. Validated with Zod.
 
 | | |
 |---|---|
@@ -598,6 +627,22 @@ Update profile fields (partial update). Accepts both camelCase and snake_case fi
 | Rate limit | User rate limit |
 | Body | Any subset: `{ "preferredTone": "string", "personalizedProfile": "string", "signatureTemplate": "string" }` |
 
+**Validation rules:**
+- `preferredTone` must be one of: `professional`, `casual`, `friendly`, `formal`, `concise`
+- `personalizedProfile` max 2000 characters
+- `signatureTemplate` max 500 characters
+
+Returns 400 with field-level errors on validation failure:
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "preferredTone: Invalid enum value. Expected 'professional' | 'casual' | 'friendly' | 'formal' | 'concise'"
+  }
+}
+```
+
+Success response:
 ```json
 {
   "exists": true,
@@ -670,6 +715,64 @@ When enabling, triggers an immediate sync. Requires an active Gmail connection.
   "enabled": true,
   "intervalHours": 24,
   "message": "Auto-sync enabled. Emails sync every 24 hour(s). Syncing now."
+}
+```
+
+### `GET /api/v1/preferences/triage`
+
+Get user's triage preferences (custom classification instructions).
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+```json
+{
+  "customInstructions": "Emails from boss@company.com are always reply_needed."
+}
+```
+
+Returns `{ "customInstructions": null }` if no custom instructions are set.
+
+### `PUT /api/v1/preferences/triage`
+
+Update user's triage preferences.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+| Body | `{ "customInstructions": "string" }` |
+| Validation | `customInstructions` must be a string, max 500 characters |
+
+```json
+{
+  "customInstructions": "Emails from boss@company.com are always reply_needed.",
+  "message": "Triage preferences updated."
+}
+```
+
+---
+
+## Draft Regeneration Endpoint
+
+### `POST /api/v1/connections/:type/threads/:id/regenerate`
+
+Regenerate an existing draft. Resets the draft status to `regenerating`, deletes any synced Gmail draft, fetches full body if needed (metadata-first), and dispatches a new draft generation task via Celery.
+
+| | |
+|---|---|
+| Auth | JWT |
+| Rate limit | User rate limit |
+
+Returns 409 if draft is in `sent` or `approved` state. Returns 404 if thread or draft not found.
+
+```json
+{
+  "status": "regenerating",
+  "message": "Draft regeneration queued",
+  "taskId": "celery-task-uuid"
 }
 ```
 

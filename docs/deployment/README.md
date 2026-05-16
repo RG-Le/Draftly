@@ -11,6 +11,7 @@ This folder contains the complete deployment documentation for Draftly on Google
 | [Build and Deploy Services](./03-build-and-deploy-services.md) | Building Docker images, pushing to Artifact Registry, deploying to Cloud Run |
 | [Cost Estimation and Scaling](./04-cost-estimation-and-scaling.md) | Pricing breakdown, scaling strategy, Cloud Run vs GKE decision |
 | [Queue Architecture Decisions](./05-queue-architecture-decisions.md) | Why BullMQ/Celery over RabbitMQ, SQS, or Google Cloud Tasks |
+| [CI/CD — GitHub Actions](./06-ci-cd-github-actions.md) | Full pipeline setup: lint, test, build, push, deploy to Cloud Run |
 
 ## Quick Reference
 

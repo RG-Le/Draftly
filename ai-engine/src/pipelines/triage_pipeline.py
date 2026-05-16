@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.pipelines.base import Pipeline, Stage, PipelineContext
-from src.infrastructure.database.models import EmailThread, EmailMessage, TriageResult
+from src.infrastructure.database.models import EmailThread, EmailMessage, TriageResult, User
 from src.config.database import get_session_factory
 from src.infrastructure.llm.llm_service import LLMService
 
@@ -61,6 +61,25 @@ def _is_noreply(from_address: str) -> bool:
     return "no-reply" in lower or "noreply" in lower or "do-not-reply" in lower
 
 
+async def _load_user_custom_instructions(user_id) -> str | None:
+    """Load user's custom triage instructions from user_preferences table."""
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        from sqlalchemy import text
+        result = await session.execute(
+            text("SELECT value FROM user_preferences WHERE user_id = :uid AND key = 'triage_settings'"),
+            {"uid": user_id}
+        )
+        row = result.first()
+        if row and row[0]:
+            try:
+                settings = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                return settings.get("custom_instructions")
+            except Exception:
+                pass
+    return None
+
+
 # ── Structured output schemas ──────────────────────────────────────────────────
 class TriageResponse(BaseModel):
     classification: str
@@ -106,17 +125,83 @@ class LoadThreadStage(Stage):
         return ctx
 
 
+class CheckUserRepliedStage(Stage):
+    """Checks if the user has already replied after the last incoming message addressed to them."""
+    async def process(self, ctx: PipelineContext) -> PipelineContext:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            user_stmt = select(User.email).where(User.id == ctx.user_id)
+            user_result = await session.execute(user_stmt)
+            user_email = user_result.scalar_one_or_none()
+
+        if not user_email:
+            return ctx
+
+        messages = ctx.data.get("messages", [])
+        user_email_lower = user_email.lower()
+
+        # Separate messages into user replies and incoming messages addressed to user
+        user_replies = []
+        incoming_to_user = []
+
+        for msg in messages:
+            if msg.is_sent_by_user:
+                user_replies.append(msg)
+            else:
+                # Check if user is in to_addresses
+                to_addrs = msg.to_addresses or []
+                if isinstance(to_addrs, list):
+                    if any(user_email_lower == addr.lower() for addr in to_addrs if addr):
+                        incoming_to_user.append(msg)
+
+        # If user was never in To of any incoming message, let LLM handle
+        if not incoming_to_user:
+            return ctx
+
+        # Find last incoming message addressed to user
+        last_incoming_to_user = incoming_to_user[-1]
+
+        # Find last user reply
+        if not user_replies:
+            return ctx
+
+        last_user_reply = user_replies[-1]
+
+        # If user replied after the last incoming message addressed to them
+        if last_user_reply.received_at and last_incoming_to_user.received_at:
+            if last_user_reply.received_at > last_incoming_to_user.received_at:
+                ctx.data["triage_result"] = {
+                    "classification": "already_replied",
+                    "confidence": 1.0,
+                    "method": "heuristic",
+                    "reasoning": "User replied after last incoming message addressed to them",
+                    "llm_metadata": None
+                }
+                ctx.data["skip_llm"] = True
+
+        return ctx
+
+
 class LLMTriageStage(Stage):
     """Uses LLM to classify a single email thread."""
     def __init__(self):
         self.llm_service = LLMService()
 
     async def process(self, ctx: PipelineContext) -> PipelineContext:
+        if ctx.data.get("skip_llm"):
+            return ctx
+
         categories_config = _load_categories()
         valid_ids = {c["id"] for c in categories_config["categories"]}
         default_fallback = categories_config["default_fallback"]
 
         system_prompt = _build_system_prompt(categories_config)
+
+        # Append user custom instructions if set
+        custom_instructions = await _load_user_custom_instructions(ctx.user_id)
+        if custom_instructions:
+            system_prompt += f"\n\nAdditional user-specific rules:\n{custom_instructions}"
+
         messages = ctx.data["messages"]
         user_prompt_parts = []
 
@@ -196,7 +281,16 @@ class SaveTriageResultStage(Stage):
                 confidence=res_data["confidence"],
                 reasoning=res_data["reasoning"],
                 llm_metadata=res_data.get("llm_metadata"),
-            ).on_conflict_do_nothing(index_elements=["thread_id"])
+            ).on_conflict_do_update(
+                index_elements=["thread_id"],
+                set_={
+                    "classification": res_data["classification"],
+                    "method": res_data["method"],
+                    "confidence": res_data["confidence"],
+                    "reasoning": res_data["reasoning"],
+                    "llm_metadata": res_data.get("llm_metadata"),
+                }
+            )
             await session.execute(stmt)
             await session.commit()
         return ctx
@@ -235,7 +329,7 @@ class LoadBatchThreadsStage(Stage):
         for thread in threads:
             tid = str(thread.id)
             msgs = thread_msgs.get(tid, [])
-            thread_data[tid] = {"thread": thread, "latest": msgs[-1] if msgs else None}
+            thread_data[tid] = {"thread": thread, "latest": msgs[-1] if msgs else None, "messages": msgs}
 
         ctx.data["batch_thread_data"] = thread_data
         return ctx
@@ -257,6 +351,16 @@ class BatchLLMTriageStage(Stage):
         batch_thread_data: dict[str, dict] = ctx.data.get("batch_thread_data", {})
         thread_ids = ctx.data.get("thread_ids", [])
 
+        # Load user's email for reply-check heuristic
+        user_email = None
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            user_stmt = select(User.email).where(User.id == ctx.user_id)
+            user_result = await session.execute(user_stmt)
+            user_email = user_result.scalar_one_or_none()
+
+        user_email_lower = user_email.lower() if user_email else None
+
         results: list[dict] = []
         llm_candidates: list[tuple[int, str]] = []  # (index_in_results, thread_id)
 
@@ -274,9 +378,36 @@ class BatchLLMTriageStage(Stage):
                 results.append({"thread_id": tid, "classification": "info",
                                  "confidence": 1.0, "method": "heuristic",
                                  "reasoning": "Sender is a no-reply address", "llm_metadata": None})
-            else:
-                llm_candidates.append((len(results), tid))
-                results.append(None)  # placeholder
+                continue
+
+            # Reply-check heuristic: check if user replied after last incoming message
+            if user_email_lower:
+                thread_messages = data.get("messages", [])
+                user_replies = []
+                incoming_to_user = []
+
+                for msg in thread_messages:
+                    if msg.is_sent_by_user:
+                        user_replies.append(msg)
+                    else:
+                        to_addrs = msg.to_addresses or []
+                        if isinstance(to_addrs, list):
+                            if any(user_email_lower == addr.lower() for addr in to_addrs if addr):
+                                incoming_to_user.append(msg)
+
+                if incoming_to_user and user_replies:
+                    last_incoming_to_user = incoming_to_user[-1]
+                    last_user_reply = user_replies[-1]
+                    if (last_user_reply.received_at and last_incoming_to_user.received_at
+                            and last_user_reply.received_at > last_incoming_to_user.received_at):
+                        results.append({"thread_id": tid, "classification": "already_replied",
+                                         "confidence": 1.0, "method": "heuristic",
+                                         "reasoning": "User replied after last incoming message addressed to them",
+                                         "llm_metadata": None})
+                        continue
+
+            llm_candidates.append((len(results), tid))
+            results.append(None)  # placeholder
 
         if not llm_candidates:
             ctx.data["batch_triage_results"] = results
@@ -296,6 +427,11 @@ class BatchLLMTriageStage(Stage):
 
         user_prompt = "\n".join(prompt_lines)
         system_prompt = _build_batch_system_prompt(categories_config)
+
+        # Append user custom instructions if set
+        custom_instructions = await _load_user_custom_instructions(ctx.user_id)
+        if custom_instructions:
+            system_prompt += f"\n\nAdditional user-specific rules:\n{custom_instructions}"
 
         # Estimate tokens: ~30 input tokens per thread + generous output budget
         estimated_max_tokens = max(1000, len(llm_candidates) * 80)
@@ -357,7 +493,7 @@ class BatchLLMTriageStage(Stage):
 
 
 class SaveBatchTriageResultsStage(Stage):
-    """Bulk-inserts all batch triage results with ON CONFLICT DO NOTHING for idempotency."""
+    """Bulk-inserts all batch triage results with ON CONFLICT DO UPDATE for idempotency."""
     async def process(self, ctx: PipelineContext) -> PipelineContext:
         if ctx.should_stop:
             return ctx
@@ -376,7 +512,16 @@ class SaveBatchTriageResultsStage(Stage):
                     confidence=res["confidence"],
                     reasoning=res.get("reasoning"),
                     llm_metadata=res.get("llm_metadata"),
-                ).on_conflict_do_nothing(index_elements=["thread_id"])
+                ).on_conflict_do_update(
+                    index_elements=["thread_id"],
+                    set_={
+                        "classification": res["classification"],
+                        "method": res["method"],
+                        "confidence": res["confidence"],
+                        "reasoning": res.get("reasoning"),
+                        "llm_metadata": res.get("llm_metadata"),
+                    }
+                )
                 await session.execute(stmt)
             await session.commit()
 
@@ -390,6 +535,7 @@ def create_triage_pipeline() -> Pipeline:
     """Single-thread triage pipeline."""
     return Pipeline("triage_workflow", [
         LoadThreadStage(),
+        CheckUserRepliedStage(),
         LLMTriageStage(),
         SaveTriageResultStage(),
     ])

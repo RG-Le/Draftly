@@ -231,6 +231,32 @@ authRouter.post('/logout-all', requireAuth, userRateLimitMiddleware, async (req:
 });
 
 // ============================================================================
+// DELETE /auth/me — Permanently delete the authenticated user's account
+//
+// All related data is removed via DB CASCADE:
+//   user_connections → email_threads → messages / triage / drafts
+//   user_profiles, user_preferences, usage_records, draft_actions
+// Refresh tokens are stored in Redis with a 7-day TTL — revoked explicitly here.
+// ============================================================================
+authRouter.delete('/me', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {
+  const userId = (req as any).user.id;
+  const db = getDatabase();
+
+  // Revoke all active refresh tokens in Redis before deleting the account row
+  await tokenService.revokeAllUserRefreshTokens(userId);
+
+  // A single DELETE is sufficient — all child rows cascade
+  const deleted = await db('users').where({ id: userId }).delete();
+
+  if (!deleted) {
+    res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    return;
+  }
+
+  res.json({ message: 'Account deleted. All data has been permanently removed.' });
+});
+
+// ============================================================================
 // Protected Test Route
 // ============================================================================
 authRouter.get('/me', requireAuth, userRateLimitMiddleware, async (req: Request, res: Response) => {

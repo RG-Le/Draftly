@@ -25,7 +25,7 @@ export function AppLayout() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user, patchUser, clearSession, refreshToken } = useAuth();
-  const { syncInProgress: realtimeSyncInProgress, markSyncCompleted, markSyncStarted } = usePipelineStatus();
+  const { syncInProgress: realtimeSyncInProgress, markSyncCompleted, markSyncStarted, triageBanner, setTriageBanner } = usePipelineStatus();
   const { pushToast } = useToast();
   const [syncMonitor, setSyncMonitor] = useState<{ startedAt: number; baselineLastSyncedAt: string | null } | null>(null);
 
@@ -41,7 +41,8 @@ export function AppLayout() {
     if (meQuery.data) {
       patchUser(meQuery.data);
     }
-  }, [meQuery.data, patchUser]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meQuery.data]);
 
   const connectionsQuery = useQuery({
     queryKey: ['connections'],
@@ -77,7 +78,7 @@ export function AppLayout() {
       if (needsReconnect(connection) || !isConnectionActive(connection)) {
         throw new Error('Connection is revoked/expired. Reconnect Gmail first.');
       }
-      return syncInbox(connection.id);
+      return syncInbox(connection.id, 7);
     },
     onSuccess: () => {
       markSyncStarted();
@@ -177,6 +178,24 @@ export function AppLayout() {
       }}
     >
       <div className="app-content">
+        {triageBanner ? (
+          <div className={`triage-banner triage-banner-${triageBanner.type}`}>
+            <span>{triageBanner.message}</span>
+            <div className="triage-banner-actions">
+              {triageBanner.type === 'failed' && triageBanner.permanent && (
+                <button
+                  className="triage-banner-btn"
+                  onClick={() => syncMutation.mutate()}
+                >
+                  Retry Sync
+                </button>
+              )}
+              {!triageBanner.permanent && (
+                <button className="triage-banner-close" onClick={() => setTriageBanner(null)} aria-label="Dismiss">×</button>
+              )}
+            </div>
+          </div>
+        ) : null}
         <ConnectionBanner
           connection={connection}
           onConnect={() => connectMutation.mutate(redirectUri)}

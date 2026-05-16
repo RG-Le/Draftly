@@ -52,6 +52,7 @@ export interface GmailSyncJobData {
   userId: string;
   correlationId: string;
   maxResults?: number;
+  daysBack?: number;
 }
 
 /**
@@ -73,6 +74,8 @@ export async function enqueueGmailSync(data: GmailSyncJobData): Promise<string> 
       );
       return jobId;
     }
+    // Remove completed/failed job so we can re-use the ID
+    await existing.remove();
   }
 
   const job = await queue.add('sync', data, { jobId });
@@ -93,10 +96,10 @@ export function startGmailSyncWorker(): Worker {
   const worker = new Worker<GmailSyncJobData>(
     QUEUE_NAME,
     async (job: Job<GmailSyncJobData>) => {
-      const { connectionId, userId, correlationId, maxResults } = job.data;
+      const { connectionId, userId, correlationId, maxResults, daysBack } = job.data;
       const log = logger.child({ correlationId, connectionId, userId, jobId: job.id });
 
-      log.info({ maxResults: maxResults || 20, attempt: job.attemptsMade + 1 }, 'Gmail sync job started');
+      log.info({ maxResults: maxResults ?? 20, daysBack: daysBack ?? 1, attempt: job.attemptsMade + 1 }, 'Gmail sync job started');
       emitToUser(userId, 'sync:started', { connectionId, correlationId });
 
       const db = getDatabase();
@@ -133,11 +136,58 @@ export function startGmailSyncWorker(): Worker {
         config.GOOGLE_CLIENT_SECRET,
       );
 
-      // 3. Sync threads from Gmail API
-      log.info({ maxResults: maxResults || 20 }, 'Calling Gmail API to sync threads');
+      // 3. Sync threads from Gmail API — with per-page triage dispatch
+      //    Each page of ~20 threads is fetched in parallel, saved, then triage is dispatched
+      //    immediately for that page. Celery starts classifying while the next page is being fetched.
+      //    Smart daysBack: if last sync was within the requested range AND we have data, only fetch from last sync time.
+      let safeDaysBack = Math.min(Math.max(daysBack ?? 7, 1), 15);
+      
+      // Only optimize if we actually have threads in DB (previous sync was successful with data)
+      const existingThreadCount = await db('email_threads').where({ connection_id: connectionId }).count('id as count').first();
+      const hasExistingData = parseInt((existingThreadCount as any)?.count || '0') > 0;
+      
+      if (hasExistingData && connection.lastSyncedAt) {
+        const lastSyncMs = new Date(connection.lastSyncedAt).getTime();
+        const requestedRangeMs = safeDaysBack * 86_400_000;
+        const timeSinceLastSync = Date.now() - lastSyncMs;
+        if (timeSinceLastSync < requestedRangeMs) {
+          const daysSinceLastSync = Math.max(1, Math.ceil(timeSinceLastSync / 86_400_000));
+          log.info({ originalDaysBack: safeDaysBack, optimizedDaysBack: daysSinceLastSync, lastSyncedAt: connection.lastSyncedAt }, 'Optimizing daysBack based on last sync time');
+          safeDaysBack = daysSinceLastSync;
+        }
+      }
+      log.info({ maxResults: maxResults ?? 20, daysBack: safeDaysBack, hasExistingData }, 'Calling Gmail API to sync threads');
+
+      const redis = getRedis();
+      const celeryBridge = new CeleryBridge(redis);
+      let totalTriageBatches = 0;
+
+      const onPageSynced = async (pageDbThreadIds: string[]) => {
+        const classifiedRows = await db('triage_results')
+          .whereIn('thread_id', pageDbThreadIds)
+          .select('thread_id');
+        const classifiedSet = new Set(classifiedRows.map((r: any) => r.thread_id));
+        const unclassified = pageDbThreadIds.filter((id) => !classifiedSet.has(id));
+
+        log.info(
+          { pageSize: pageDbThreadIds.length, alreadyClassified: classifiedRows.length, toDispatch: unclassified.length },
+          'Page synced — dispatching triage for unclassified threads',
+        );
+
+        if (unclassified.length === 0) return;
+
+        const batchSize = config.TRIAGE_BATCH_SIZE;
+        for (let i = 0; i < unclassified.length; i += batchSize) {
+          const chunk = unclassified.slice(i, i + batchSize);
+          const taskId = await celeryBridge.dispatchTriageBatchTask({ threadIds: chunk, userId, correlationId });
+          totalTriageBatches++;
+          log.info({ batchIndex: totalTriageBatches, threadCount: chunk.length, celeryTaskId: taskId }, 'Per-page triage batch dispatched');
+        }
+      };
+
       let result: { synced: number; messages: number };
       try {
-        result = await adapter.syncRecentThreads(maxResults || 20);
+        result = await adapter.syncRecentThreads(maxResults ?? 20, safeDaysBack, onPageSynced);
       } catch (err: any) {
         log.error({ error: err.message, stack: err.stack }, 'Gmail API sync failed');
         await connectionRepo.updateSyncStatus(connectionId, 'error', err.message);
@@ -146,52 +196,59 @@ export function startGmailSyncWorker(): Worker {
 
       // 4. Update sync status
       await connectionRepo.updateSyncStatus(connectionId, 'success', null);
-      log.info({ synced: result.synced, messages: result.messages }, 'Gmail API sync completed');
+      log.info(
+        { synced: result.synced, messages: result.messages, triageBatchesDispatched: totalTriageBatches },
+        'Gmail sync completed — all per-page triage batches dispatched',
+      );
 
-      // 5. Dispatch batch triage to the Python AI Engine for unclassified threads
-      const threads = await emailRepo.findThreadsByConnection(connectionId, maxResults || 20);
-      log.info({ threadCount: threads.length }, 'Threads fetched from DB for triage dispatch');
-
-      const redis = getRedis();
-      const celeryBridge = new CeleryBridge(redis);
-
-      if (threads.length === 0) {
-        log.warn('No threads found in DB after sync — triage dispatch skipped');
-      } else {
-        // Single query for all already-classified thread IDs (avoids N+1)
-        const threadIds = threads.map((t) => t.id);
-        const classifiedRows = await db('triage_results')
-          .whereIn('thread_id', threadIds)
-          .select('thread_id');
-        const classifiedSet = new Set(classifiedRows.map((r: any) => r.thread_id));
-        const unclassifiedIds = threadIds.filter((id) => !classifiedSet.has(id));
-
-        log.info(
-          { total: threadIds.length, alreadyClassified: classifiedRows.length, toDispatch: unclassifiedIds.length },
-          'Triage dispatch readiness',
-        );
-
-        if (unclassifiedIds.length === 0) {
-          log.info('All fetched threads already classified — triage dispatch skipped');
-        } else {
-          const batchSize = config.TRIAGE_BATCH_SIZE;
-          let batchCount = 0;
-          for (let i = 0; i < unclassifiedIds.length; i += batchSize) {
-            const chunk = unclassifiedIds.slice(i, i + batchSize);
-            const taskId = await celeryBridge.dispatchTriageBatchTask({ threadIds: chunk, userId, correlationId });
-            batchCount++;
-            log.info(
-              { batchIndex: batchCount, threadCount: chunk.length, celeryTaskId: taskId },
-              'Batch triage task dispatched to Celery via Redis LPUSH',
-            );
-          }
-          log.info({ totalBatches: batchCount, totalThreads: unclassifiedIds.length }, 'All triage batches dispatched');
-        }
-      }
-
-      // 6. Dispatch LLM profile calibration if profile hasn't been calibrated yet
+      // 5. Dispatch LLM profile calibration if profile hasn't been calibrated yet
+      //    With metadata-first sync, sent email bodies need to be fetched before profile analysis.
       const profileExists = await db('user_profiles').where({ user_id: userId }).first();
       if (!profileExists || !profileExists.last_calibrated_at) {
+        // Fetch body content for sent emails (needed for profile style analysis)
+        let sentMessages = await db('email_messages as em')
+          .join('email_threads as et', 'em.thread_id', 'et.id')
+          .where('et.connection_id', connectionId)
+          .where('em.is_sent_by_user', true)
+          .select('et.external_thread_id')
+          .groupBy('et.external_thread_id')
+          .limit(10);
+
+        if (sentMessages.length < 3) {
+          log.info('Not enough sent emails found in DB, fetching latest sent emails directly from Gmail API for profile');
+          await adapter.fetchLatestSentEmails(5);
+          
+          // Re-fetch after downloading latest sent emails
+          sentMessages = await db('email_messages as em')
+            .join('email_threads as et', 'em.thread_id', 'et.id')
+            .where('et.connection_id', connectionId)
+            .where('em.is_sent_by_user', true)
+            .select('et.external_thread_id')
+            .groupBy('et.external_thread_id')
+            .limit(10);
+        }
+
+        // Now ensure any sent messages we found actually have their bodies downloaded
+        const sentMessagesWithoutBody = await db('email_messages as em')
+          .join('email_threads as et', 'em.thread_id', 'et.id')
+          .where('et.connection_id', connectionId)
+          .where('em.is_sent_by_user', true)
+          .whereNull('em.body_text')
+          .select('et.external_thread_id')
+          .groupBy('et.external_thread_id')
+          .limit(10);
+
+        if (sentMessagesWithoutBody.length > 0) {
+          log.info({ sentThreadCount: sentMessagesWithoutBody.length }, 'Fetching body for sent emails (needed for profile)');
+          for (const row of sentMessagesWithoutBody) {
+            try {
+              await adapter.fetchThreadFull(row.external_thread_id);
+            } catch (err: any) {
+              log.warn({ threadId: row.external_thread_id, error: err.message }, 'Failed to fetch sent thread body');
+            }
+          }
+        }
+
         const profileTaskId = await celeryBridge.dispatchProfileBuildTask({ userId, correlationId });
         log.info({ celeryTaskId: profileTaskId }, 'Profile build task dispatched');
       } else {

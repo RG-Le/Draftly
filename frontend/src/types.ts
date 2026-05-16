@@ -131,6 +131,14 @@ export interface ProfileData {
   profileVersion?: number;
   confidenceScore?: number;
   lastCalibratedAt?: string | null;
+  profileSource?: 'ai_generated' | 'default' | 'manual' | string;
+  isAiGenerated?: boolean;
+}
+
+export interface TriageBannerState {
+  type: 'retrying' | 'failed';
+  message: string;
+  permanent?: boolean;
 }
 
 export interface UserPreference {

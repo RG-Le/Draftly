@@ -24,9 +24,13 @@ import { getApiErrorMessage } from '../lib/api-error';
 const triageFilters = [
   { key: '', label: 'All' },
   { key: 'reply_needed', label: 'Reply Needed' },
+  { key: 'info', label: 'Info' },
   { key: 'promotions', label: 'Promotions' },
-  { key: 'info', label: 'Info (FYI)' }
+  { key: 'urgent', label: 'Urgent' },
+  { key: 'spam', label: 'Spam' }
 ];
+
+const PAGE_LIMIT = 20;
 
 export function InboxPage() {
   const { threadId } = useParams();
@@ -41,6 +45,7 @@ export function InboxPage() {
     triageInProgressThreadIds
   } = usePipelineStatus();
   const [classification, setClassification] = useState('');
+  const [page, setPage] = useState(1);
   const [draftGenerationThreadId, setDraftGenerationThreadId] = useState<string | null>(null);
   const [draftGenerationStartedAt, setDraftGenerationStartedAt] = useState<number | null>(null);
   const [triageWatchThreadId, setTriageWatchThreadId] = useState<string | null>(null);
@@ -59,9 +64,13 @@ export function InboxPage() {
       draftInProgressThreadIds.includes(threadId as string) ||
       triageInProgressThreadIds.includes(threadId as string));
 
+  useEffect(() => {
+    setPage(1);
+  }, [classification]);
+
   const threadsQuery = useQuery({
-    queryKey: ['threads', classification],
-    queryFn: () => listThreads({ page: 1, limit: 30, category: classification || undefined }),
+    queryKey: ['threads', classification, page],
+    queryFn: () => listThreads({ page, limit: PAGE_LIMIT, category: classification || undefined }),
     refetchInterval: shouldPollPipelines ? 5000 : false
   });
 
@@ -336,17 +345,15 @@ export function InboxPage() {
       <section className="panel thread-panel">
         <div className="panel-header">
           <h2>Inbox Review Queue</h2>
-          <div className="chip-group">
+          <select
+            className="category-filter"
+            value={classification}
+            onChange={(e) => setClassification(e.target.value)}
+          >
             {triageFilters.map((filter) => (
-              <button
-                key={filter.key || 'all'}
-                className={`chip ${classification === filter.key ? 'chip-active' : ''}`}
-                onClick={() => setClassification(filter.key)}
-              >
-                {filter.label}
-              </button>
+              <option key={filter.key} value={filter.key}>{filter.label}</option>
             ))}
-          </div>
+          </select>
         </div>
         {classificationFilterBackendLimited ? (
           <p className="status-note warning">
@@ -368,18 +375,37 @@ export function InboxPage() {
 
         {threadsQuery.isLoading ? (
           <LoadingCard lines={5} />
-        ) : threads.length === 0 ? (
+        ) : threads.length === 0 && page === 1 ? (
           <EmptyState
             title="No threads yet"
             description="Start a sync to pull inbox threads into the review queue."
           />
         ) : (
-          <ThreadList
-            threads={threads}
-            selectedThreadId={threadId}
-            pendingTriageThreadIds={triageInProgressThreadIds}
-            pendingDraftThreadIds={draftInProgressThreadIds}
-          />
+          <>
+            <ThreadList
+              threads={threads}
+              selectedThreadId={threadId}
+              pendingTriageThreadIds={triageInProgressThreadIds}
+              pendingDraftThreadIds={draftInProgressThreadIds}
+            />
+            <div className="pagination">
+              <button
+                className="pagination-btn"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                ← Previous
+              </button>
+              <span className="pagination-info">Page {page}</span>
+              <button
+                className="pagination-btn"
+                disabled={threads.length < PAGE_LIMIT}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next →
+              </button>
+            </div>
+          </>
         )}
       </section>
 

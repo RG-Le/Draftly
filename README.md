@@ -19,9 +19,14 @@ Before setting up Draftly locally, ensure you have the following installed:
 
 - **Node.js** (v20 or higher)
 - **Python** (v3.12 or higher)
-- **Docker & Docker Compose** (for running local DB and Redis)
+- **Docker & Docker Compose** (Docker Desktop on Windows/Mac)
 - **Git**
 - **Poetry** (Python dependency manager)
+
+**Windows-specific notes:**
+- Use Docker Desktop with WSL2 backend
+- Celery workers use `--pool=solo` on Windows (no prefork support)
+- All scripts work in PowerShell or Git Bash
 
 You will also need credentials from external services:
 1. **Google Cloud Console:** Create a project, enable the Gmail API, and create OAuth 2.0 Client credentials. Add `http://localhost:3000/api/v1/auth/google/callback` to the Authorized redirect URIs.
