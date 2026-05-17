@@ -37,11 +37,15 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        from urllib.parse import quote_plus
+        encoded_password = quote_plus(self.db_password)
+        return f"postgresql+asyncpg://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     @property
     def database_url_sync(self) -> str:
-        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        from urllib.parse import quote_plus
+        encoded_password = quote_plus(self.db_password)
+        return f"postgresql://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     model_config = {
         "env_file": [".env", "../.env"],

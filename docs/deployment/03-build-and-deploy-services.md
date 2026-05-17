@@ -115,7 +115,7 @@ Build the frontend (pass the Gateway URL as build arg):
 
 ```bash
 docker build \
-  --build-arg VITE_API_URL=https://draftly-gateway-XXXXX.run.app \
+  --build-arg VITE_API_BASE_URL=https://draftly-gateway-XXXXX.run.app \
   -t $REGISTRY/frontend:latest \
   -t $REGISTRY/frontend:$(git rev-parse --short HEAD) \
   ./frontend
@@ -348,7 +348,7 @@ Now that you have the Gateway URL:
 
 ```bash
 docker build \
-  --build-arg VITE_API_URL=https://draftly-gateway-XXXXX.run.app \
+  --build-arg VITE_API_BASE_URL=https://draftly-gateway-XXXXX.run.app \
   -t $REGISTRY/frontend:latest \
   ./frontend
 
