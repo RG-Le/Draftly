@@ -125,7 +125,7 @@ The triage pipeline supports both single-thread and batch classification modes.
 ### Single-Thread Pipeline
 
 ```
-LoadThreadStage → CheckUserRepliedStage → LLMTriageStage → SaveTriageResultStage
+LoadThreadStage → CheckUserRepliedStage → CheckDraftInProgressStage → LLMTriageStage → SaveTriageResultStage
 ```
 
 ### Batch Pipeline (primary mode, triggered after sync)
@@ -136,23 +136,26 @@ LoadBatchThreadsStage → BatchLLMTriageStage → SaveBatchTriageResultsStage
 
 ### Stages
 
-**1. LoadThreadStage** — Reads thread + all messages from DB, ordered chronologically. Extracts: subject, from_address, body text.
+**1. LoadThreadStage** — Reads thread + ALL messages from DB (including native Gmail drafts), ordered chronologically. The full message list is passed downstream so heuristic stages can inspect draft presence.
 
-**2. CheckUserRepliedStage** — Detects if the user has already replied after the last incoming message addressed to them. Multi-party thread aware: only considers messages where the user is in the `To` field. If the user's last reply is newer than the last incoming message addressed to them, classifies as `already_replied` with confidence 1.0 and sets `skip_llm = True` to bypass the LLM stage.
+**2. CheckUserRepliedStage** — Detects if the user has already **sent** a reply after the last incoming message addressed to them. Multi-party thread aware: only considers messages where the user is in the `To` field and where `is_sent_by_user = True` and `is_draft = False`. If the user's last sent reply is newer than the last incoming message to them, classifies as `already_replied` (confidence 1.0, `skip_llm = True`).
 
-**3. LLMTriageStage** — Heuristic pre-filter first: if sender matches `no-reply`/`noreply`/`do-not-reply` patterns → classified as `info` with confidence 1.0 (no LLM call). Otherwise calls LLM with structured output (Pydantic `TriageResponse` model). Returns JSON with `classification`, `confidence`, and `reasoning`. Uses `generate_structured()` for type-safe responses. **Custom instructions** are loaded from `user_preferences` table (key: `triage_settings`) and appended to the system prompt as "Additional user-specific rules."
+**3. CheckDraftInProgressStage (NEW)** — Runs only if `skip_llm` is not already set. Checks if any message in the thread has `is_draft = True`. If found, classifies as `draft_in_progress` (confidence 1.0, method=heuristic, `skip_llm = True`). **Zero LLM tokens consumed.**
 
-**4. SaveTriageResultStage** — Upserts result to `triage_results` table using **`ON CONFLICT DO UPDATE`** (allows re-classification on manual re-triage). Records LLM metadata (model, tokens, cost).
+**4. LLMTriageStage** — Heuristic pre-filter first: if the latest non-draft sender matches `no-reply` patterns → `info` (no LLM call). Otherwise calls LLM with structured output (Pydantic `TriageResponse`). **Native Gmail drafts are filtered out of the prompt** so the LLM never sees unsent text. Custom instructions from `user_preferences` are appended to the system prompt.
 
-**5. BatchLLMTriageStage** — Processes multiple threads in a single LLM call. Applies heuristic pre-filters first (no-reply detection + user-replied check), then builds a numbered list of remaining emails and requests a `BatchTriageResponse` with results array. Falls back to default classification if batch parsing fails. Also loads and appends custom instructions.
+**5. SaveTriageResultStage** — Upserts result to `triage_results` table using **`ON CONFLICT DO UPDATE`** (allows re-classification on manual re-triage). Records LLM metadata (model, tokens, cost).
 
-**6. SaveBatchTriageResultsStage** — Bulk-inserts all batch triage results with **`ON CONFLICT DO UPDATE`** for idempotency.
+**6. BatchLLMTriageStage** — Processes multiple threads in a single LLM call. Applies heuristic pre-filters in order (no-reply → already-replied → draft-in-progress), then sends remaining threads to the LLM in one batched call. Native draft messages are excluded from the prompt for LLM candidate threads.
+
+**7. SaveBatchTriageResultsStage** — Bulk-inserts all batch triage results with **`ON CONFLICT DO UPDATE`** for idempotency.
 
 ### Triage Categories (from `triage_categories.json`)
 
 Categories are externalized to a JSON config file, not hardcoded:
 - `reply_needed` — Requires a response from the user
-- `already_replied` — User has already sent a reply after the last incoming message
+- `already_replied` — User has already **sent** a reply after the last incoming message
+- `draft_in_progress` — A native Gmail draft exists in the thread; reply not yet sent (**heuristic only, no LLM call**)
 - `promotions` — Marketing, newsletters, deals
 - `info` — Informational notifications, no response needed
 - `junk` — Spam or irrelevant content
@@ -173,6 +176,13 @@ This allows users to override default classification behavior for specific sende
 
 After Gmail sync, unclassified threads are dispatched in batches (configurable via `TRIAGE_BATCH_SIZE`, default 25). This reduces LLM calls significantly — one call classifies up to 25 threads instead of 25 separate calls.
 
+### Multi-party Thread Classification
+
+The heuristic reply-check in `CheckUserRepliedStage` is designed to handle multi-person email threads correctly:
+- It tracks **incoming messages addressed to the user** (the user appears in `To`) separately from all incoming messages.
+- It uses timestamps to determine if the user's last sent message is more recent than the last incoming message that was addressed to them.
+- In a chain `A→user→A→B (addressing user)`, B's message is the `last_incoming_to_user`. The user's last reply predates B's message, so `skip_llm` is NOT set. The thread goes to the LLM which correctly classifies it as `reply_needed`.
+
 ---
 
 ## Draft Generation Pipeline
@@ -183,7 +193,7 @@ LoadThreadHistory → LoadUserProfile → FormatContext → LLMDraftGeneration �
 
 ### Stages
 
-**1. LoadThreadHistoryStage** — Loads all messages for the thread, ordered chronologically. Also loads the user's email address for context labeling.
+**1. LoadThreadHistoryStage** — Loads all **non-draft** messages for the thread (`is_draft = False`), ordered chronologically. Also loads the user's email address for context labeling. Native Gmail drafts are excluded so the LLM generates a fresh reply without repeating in-progress work.
 
 **2. LoadUserProfileStage** — Reads the user's personalized communication profile from `user_profiles` table.
 
@@ -327,10 +337,36 @@ class LLMService:
 
 ---
 
+## Cloud Run Deployment & Wakeup Architecture
+
+The AI Engine is deployed to Google Cloud Run with a **CPU Always Allocated + `min-instances=0`** model:
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `--no-cpu-throttling` | enabled | Celery background tasks need full CPU; throttled instances receive `SIGKILL` |
+| `--min-instances` | `0` | Container spins down to zero when idle; no cost when no work is queued |
+| `--max-instances` | `2` | Prevents cost overrun on traffic spikes |
+
+### Wakeup Ping Protocol
+
+Because `min-instances=0` means the container may be frozen, the Gateway's `CeleryBridge` sends a lightweight `GET /ping` to the AI Engine's FastAPI server immediately after enqueuing each Redis task. This wakes the container before Celery starts processing the job:
+
+```
+Gateway: LPUSH job → Redis → (async) GET /ping → AI Engine FastAPI
+                                                        ↓
+                                              Container boots in ~2s
+                                                        ↓
+                                              Celery worker processes job
+```
+
+The ping uses a fire-and-forget retry loop (up to 3 attempts, 500ms apart). Failures are logged as warnings and do not block job dispatch — the Celery retry mechanism handles any worker-not-ready cases.
+
+---
+
 ## Implementation Priority
 
 1. Celery app + Redis broker config
-2. FastAPI health endpoint
+2. FastAPI health endpoint + `/ping` wakeup endpoint
 3. SQLAlchemy async engine + session
 4. Pipeline framework (base classes)
 5. LLMRouter (LiteLLM + Gemini)

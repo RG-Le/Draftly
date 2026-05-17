@@ -11,6 +11,7 @@ Two services (Node.js Gateway, Python AI Engine) need to coordinate work. They s
 | Interaction | Pattern | Mechanism | Direction |
 |-------------|---------|-----------|-----------|
 | Enqueue AI work (triage, draft, profile) | Async job queue | Redis (Celery protocol) | Node → Python |
+| Wakeup AI Engine from scale-to-zero | HTTP GET fire-and-forget | FastAPI `/ping` | Node → Python |
 | Notify user of AI results | Pub/sub event | Redis pub/sub | Python → Node |
 | Share data (threads, drafts, profiles) | Shared database | PostgreSQL | Both read/write |
 | Health check Python service | HTTP GET | FastAPI `/health` | Node → Python |
@@ -50,8 +51,27 @@ class CeleryBridge {
   dispatchDraftTask({ threadId, userId, correlationId }): Promise<string>;
   dispatchProfileUpdateTask({ userId, draftId, correlationId }): Promise<string>;
   dispatchProfileBuildTask({ userId, correlationId }): Promise<string>;
+  private pingAiWorker(): Promise<void>;  // Fire-and-forget wakeup
 }
 ```
+
+### Wakeup Ping (Scale-to-Zero)
+
+Because the AI Engine runs on Cloud Run with `min-instances=0`, its container may be frozen when a task is dispatched. To minimise cold-start latency, `CeleryBridge` sends a `GET /ping` to the AI Engine's FastAPI endpoint **immediately after** every `LPUSH` to Redis:
+
+```
+CeleryBridge.dispatchXxxTask()
+  ├─ LPUSH job → Redis  (task queued)
+  └─ GET /ping → AI Engine (async, fire-and-forget, up to 3 retries × 500 ms)
+                   └─ Container wakes up in ~2s
+                   └─ Celery BRPOP picks up job and processes it
+```
+
+Ping failures are **logged as warnings and never block dispatch** — the Celery retry mechanism (`max_retries=2`) provides the safety net if the worker is momentarily unready.
+
+The `AI_WORKER_URL` environment variable controls where the ping is sent:
+- **Local Docker:** `http://ai-engine-api:8000` (Docker network hostname)
+- **Cloud Run:** `https://draftly-ai-worker-XXXXX.a.run.app` (set via `--update-env-vars`)
 
 ### Message format
 

@@ -131,7 +131,8 @@ UNIQUE constraint: `(connection_id, external_thread_id)`
 | body_html | text | | HTML body (for rendering) |
 | raw_headers | jsonb | | Full headers for audit |
 | received_at | timestamptz | NOT NULL | |
-| is_sent_by_user | boolean | NOT NULL, DEFAULT false | |
+| is_sent_by_user | boolean | NOT NULL, DEFAULT false | `true` when Gmail `SENT` label is present |
+| is_draft | boolean | NOT NULL, DEFAULT false | `true` when Gmail `DRAFT` label is present. Prevents misclassification in triage. |
 | created_at | timestamptz | NOT NULL, DEFAULT NOW() | |
 
 ### triage_results
@@ -140,7 +141,7 @@ UNIQUE constraint: `(connection_id, external_thread_id)`
 |--------|------|-------------|-------|
 | id | uuid (v7) | PK | |
 | thread_id | uuid | FK → email_threads, UNIQUE, NOT NULL | One result per thread |
-| classification | varchar(50) | NOT NULL | 'reply_needed', 'already_replied', 'promotions', 'info', 'junk' (configurable via triage_categories.json) |
+| classification | varchar(50) | NOT NULL | `reply_needed`, `already_replied`, `draft_in_progress`, `promotions`, `info`, `junk` (configurable via `triage_categories.json`) |
 | method | varchar(20) | NOT NULL | 'heuristic', 'llm', 'batch_llm' |
 | confidence | decimal(3,2) | | 0.0 to 1.0 |
 | reasoning | text | | LLM's explanation or heuristic rule matched |
@@ -337,4 +338,10 @@ CREATE INDEX idx_audit_correlation ON audit_logs(correlation_id)
 011_create_usage_records.ts      (with partitioning)
 012_create_audit_logs.ts         (with partitioning)
 013_create_indexes.ts
+014_add_external_draft_id.ts
+015_seed_prompt_templates.ts
+016_add_personalized_profile.ts
+017_add_profile_source.ts
+018_seed_triage_prompts.ts
+019_add_is_draft_to_email_messages.ts  (← adds is_draft boolean column for native Gmail draft detection)
 ```

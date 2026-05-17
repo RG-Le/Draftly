@@ -164,6 +164,7 @@ Environment variables:
 | `DB_NAME` | `draftly` |
 | `DB_USER` | `draftly` |
 | `REDIS_URL` | `redis://10.0.0.3:6379` (your Memorystore IP) |
+| `AI_WORKER_URL` | `https://draftly-ai-worker-XXXXX.a.run.app` (your AI Worker Cloud Run URL) |
 | `CORS_ORIGINS` | `https://draftly-frontend-XXXXX.run.app` (update after frontend deploy) |
 | `GOOGLE_CALLBACK_URL` | `https://draftly-gateway-XXXXX.run.app/api/v1/auth/google/callback` |
 | `GMAIL_CALLBACK_URL` | `https://draftly-gateway-XXXXX.run.app/api/v1/connections/callback` |
@@ -212,8 +213,10 @@ Wait for deployment. Note the service URL (e.g., `https://draftly-gateway-abc123
 - CPU: `2`
 - Memory: `1 GiB`
 - Request timeout: `3600`
-- Min instances: `1`
-- Max instances: `3`
+- **CPU allocation:** Select **"CPU is always allocated"** (`--no-cpu-throttling`)
+  > ⚠️ This is **critical**. Without it, the Cloud Run instance's CPU is throttled to near-zero when not handling HTTP requests. Celery background tasks (which don't serve HTTP) will be `SIGKILL`-ed mid-processing. "CPU always allocated" prevents this.
+- Min instances: `0` (scales to zero when idle — no billing when no tasks are queued)
+- Max instances: `2`
 
 > **Why leave Command blank?** The `ai-engine/start.sh` entrypoint reads `DRAFTLY_ROLE`:
 > - `worker` → starts uvicorn health server in background + launches Celery worker (correct for Cloud Run, which requires a process to bind the health-check port)
