@@ -54,8 +54,8 @@ async def async_build_profile(user_id: str):
     bind=True,
     max_retries=2,
     default_retry_delay=60,
-    time_limit=240,
-    soft_time_limit=180,
+    time_limit=300,
+    soft_time_limit=270,
 )
 def build_profile_task(self, user_id: str) -> dict:
     """Build or update a user's communication profile based on their sent emails."""

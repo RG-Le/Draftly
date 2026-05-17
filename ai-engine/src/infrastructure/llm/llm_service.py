@@ -63,11 +63,15 @@ class LLMService:
         try:
             return await self._call_model(self.primary_model, kwargs)
         except Exception as e:
+            if type(e).__name__ == "SoftTimeLimitExceeded":
+                raise e
             print(f"\n[DEBUG] Primary model ({self.primary_model}) failed: {e}")
             logger.warning("llm.primary_model_failed", error=str(e), fallback=self.fallback_model)
             try:
                 return await self._call_model(self.fallback_model, kwargs)
             except Exception as fallback_err:
+                if type(fallback_err).__name__ == "SoftTimeLimitExceeded":
+                    raise fallback_err
                 logger.error("llm.fallback_model_failed", error=str(fallback_err))
                 # Trigger mock fallback if both fail
                 return await self._mock_fallback(response_format)

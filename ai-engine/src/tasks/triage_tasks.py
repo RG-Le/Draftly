@@ -67,8 +67,8 @@ async def _async_classify_thread(thread_id: str, correlation_id: str, user_id: s
     bind=True,
     queue="triage-queue",
     max_retries=3,
-    time_limit=30,
-    soft_time_limit=25,
+    time_limit=60,
+    soft_time_limit=50,
 )
 def classify_thread(self, thread_id: str, correlation_id: str, user_id: str) -> dict:
     attempt = self.request.retries + 1
@@ -156,8 +156,8 @@ async def _async_classify_thread_batch(thread_ids: list[str], correlation_id: st
     bind=True,
     queue="triage-queue",
     max_retries=4,
-    time_limit=120,
-    soft_time_limit=110,
+    time_limit=240,
+    soft_time_limit=210,
 )
 def classify_thread_batch(self, thread_ids: list[str], correlation_id: str, user_id: str) -> dict:
     attempt = self.request.retries + 1
