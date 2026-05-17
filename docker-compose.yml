@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: draftly
       POSTGRES_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -29,7 +29,7 @@ services:
       POOL_MODE: transaction
       AUTH_TYPE: plain
     ports:
-      - "6432:6432"
+      - "127.0.0.1:6432:6432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,7 +39,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: >
       redis-server
       --maxmemory 512mb
@@ -84,7 +84,7 @@ services:
       dockerfile: Dockerfile
       target: development
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file: .env
     environment:
       NODE_ENV: development
@@ -95,6 +95,7 @@ services:
       DB_USER: draftly
       DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
       REDIS_URL: redis://redis:6379
+      AI_WORKER_URL: http://ai-engine-api:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,7 +149,7 @@ services:
       dockerfile: Dockerfile
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file: .env
     environment:
       DB_HOST: postgres
@@ -199,7 +200,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     environment:
       VITE_API_BASE_URL: http://localhost:3000
     # Mount source for hot-module-reload

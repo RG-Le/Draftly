@@ -182,6 +182,28 @@ class CheckUserRepliedStage(Stage):
         return ctx
 
 
+class CheckDraftInProgressStage(Stage):
+    """Checks if there is a native Gmail draft in progress."""
+    async def process(self, ctx: PipelineContext) -> PipelineContext:
+        if ctx.data.get("skip_llm"):
+            return ctx
+            
+        messages = ctx.data.get("messages", [])
+        has_draft = any(msg.is_draft for msg in messages)
+        
+        if has_draft:
+            ctx.data["triage_result"] = {
+                "classification": "draft_in_progress",
+                "confidence": 1.0,
+                "method": "heuristic",
+                "reasoning": "A native draft is already in progress for this thread.",
+                "llm_metadata": None
+            }
+            ctx.data["skip_llm"] = True
+            
+        return ctx
+
+
 class LLMTriageStage(Stage):
     """Uses LLM to classify a single email thread."""
     def __init__(self):
@@ -202,7 +224,8 @@ class LLMTriageStage(Stage):
         if custom_instructions:
             system_prompt += f"\n\nAdditional user-specific rules:\n{custom_instructions}"
 
-        messages = ctx.data["messages"]
+        # Filter out native drafts so the LLM doesn't see them
+        messages = [msg for msg in ctx.data["messages"] if not msg.is_draft]
         user_prompt_parts = []
 
         latest_msg = messages[-1] if messages else None
@@ -406,6 +429,15 @@ class BatchLLMTriageStage(Stage):
                                          "llm_metadata": None})
                         continue
 
+            # Check for native drafts in progress
+            has_draft = any(msg.is_draft for msg in thread_messages)
+            if has_draft:
+                results.append({"thread_id": tid, "classification": "draft_in_progress",
+                                 "confidence": 1.0, "method": "heuristic",
+                                 "reasoning": "A native draft is already in progress for this thread.",
+                                 "llm_metadata": None})
+                continue
+
             llm_candidates.append((len(results), tid))
             results.append(None)  # placeholder
 
@@ -417,7 +449,10 @@ class BatchLLMTriageStage(Stage):
         prompt_lines = []
         for seq_idx, (_, tid) in enumerate(llm_candidates):
             data = batch_thread_data[tid]
-            latest = data.get("latest")
+            thread_messages = data.get("messages", [])
+            non_draft_msgs = [msg for msg in thread_messages if not msg.is_draft]
+            latest = non_draft_msgs[-1] if non_draft_msgs else None
+            
             from_addr = latest.from_address if latest else "Unknown"
             subject = latest.subject if latest else "(no subject)"
             cc_flag = bool(latest.cc_addresses) if latest else False
@@ -536,6 +571,7 @@ def create_triage_pipeline() -> Pipeline:
     return Pipeline("triage_workflow", [
         LoadThreadStage(),
         CheckUserRepliedStage(),
+        CheckDraftInProgressStage(),
         LLMTriageStage(),
         SaveTriageResultStage(),
     ])

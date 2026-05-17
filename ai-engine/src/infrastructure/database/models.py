@@ -73,6 +73,7 @@ class EmailMessage(Base):
     raw_headers = Column(JSON)
     received_at = Column(DateTime(timezone=True))
     is_sent_by_user = Column(Boolean, nullable=False, default=False)
+    is_draft = Column(Boolean, nullable=False, server_default='false')
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     thread = relationship("EmailThread", back_populates="messages")

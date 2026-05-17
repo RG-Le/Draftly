@@ -17,7 +17,7 @@ class LoadThreadHistoryStage(Stage):
     async def process(self, ctx: PipelineContext) -> PipelineContext:
         session_factory = get_session_factory()
         async with session_factory() as session:
-            stmt = select(EmailMessage).where(EmailMessage.thread_id == ctx.thread_id).order_by(EmailMessage.received_at.asc())
+            stmt = select(EmailMessage).where(EmailMessage.thread_id == ctx.thread_id, EmailMessage.is_draft == False).order_by(EmailMessage.received_at.asc())
             result = await session.execute(stmt)
             messages = result.scalars().all()
             

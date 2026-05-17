@@ -76,6 +76,9 @@ const envSchema = z.object({
 
   // Triage
   TRIAGE_BATCH_SIZE: z.coerce.number().default(25),
+
+  // AI Worker (for scale-to-zero wakeups)
+  AI_WORKER_URL: z.string().optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

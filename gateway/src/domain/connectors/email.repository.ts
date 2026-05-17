@@ -169,6 +169,7 @@ export class EmailRepository {
     rawHeaders: Record<string, unknown> | null;
     receivedAt: Date;
     isSentByUser: boolean;
+    isDraft: boolean;
   }): Promise<EmailMessage> {
     // Skip if message already exists (idempotent)
     const existing = await this.findMessageByExternalId(msg.externalMessageId);
@@ -187,6 +188,7 @@ export class EmailRepository {
         raw_headers: msg.rawHeaders ? JSON.stringify(msg.rawHeaders) : null,
         received_at: msg.receivedAt,
         is_sent_by_user: msg.isSentByUser,
+        is_draft: msg.isDraft,
       })
       .returning('*');
     return this.mapMessage(created);
@@ -245,6 +247,7 @@ export class EmailRepository {
         : null,
       receivedAt: row.received_at,
       isSentByUser: row.is_sent_by_user,
+      isDraft: row.is_draft,
       createdAt: row.created_at,
     };
   }

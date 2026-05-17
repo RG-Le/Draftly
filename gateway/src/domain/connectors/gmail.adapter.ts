@@ -157,6 +157,7 @@ export class GmailAdapter {
             const receivedAt = msg.internalDate ? new Date(parseInt(msg.internalDate, 10)) : new Date();
             const labels = msg.labelIds || [];
             const isSentByUser = labels.includes('SENT');
+            const isDraft = labels.includes('DRAFT');
 
             // Metadata-first: body is NOT available in metadata format.
             // It will be fetched on-demand via fetchThreadFull() when needed
@@ -173,6 +174,7 @@ export class GmailAdapter {
               rawHeaders: null,
               receivedAt,
               isSentByUser,
+              isDraft,
             });
             totalMessages++;
           }
@@ -291,6 +293,7 @@ export class GmailAdapter {
           const receivedAt = msg.internalDate ? new Date(parseInt(msg.internalDate, 10)) : new Date();
           const labels = msg.labelIds || [];
           const isSentByUser = labels.includes('SENT');
+          const isDraft = labels.includes('DRAFT');
           
           const { bodyText, bodyHtml } = this.extractBody(msg.payload);
 
@@ -306,6 +309,7 @@ export class GmailAdapter {
             rawHeaders: null,
             receivedAt,
             isSentByUser,
+            isDraft,
           });
           
           if (isSentByUser && (bodyText || bodyHtml)) {

@@ -11,6 +11,11 @@
       "description": "The user has already sent a reply in this thread after the last incoming message addressed to them."
     },
     {
+      "id": "draft_in_progress",
+      "label": "Draft in Progress",
+      "description": "The user has started drafting a reply, but it has not been sent yet."
+    },
+    {
       "id": "promotions",
       "label": "Promotions",
       "description": "Marketing emails, deals, newsletters, offers, or broadcast content from companies or services."
