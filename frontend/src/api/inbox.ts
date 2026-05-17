@@ -280,10 +280,11 @@ export async function getThreadDetail(threadId: string): Promise<ThreadDetail> {
         : null;
 
     const fromPayload = payloadDraft ? toDraft(payloadDraft, threadId) : null;
+    // Prefer the payload draft when it has actual content; fall back to the legacy draft otherwise.
     const draft =
-      fromPayload?.currentContent || fromPayload?.generatedContent
+      (fromPayload?.currentContent || fromPayload?.generatedContent)
         ? fromPayload
-        : legacyDraft ?? fromPayload;
+        : (legacyDraft ?? fromPayload);
 
     return {
       thread: toThreadSummary(payload.thread),

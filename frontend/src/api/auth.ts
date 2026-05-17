@@ -1,6 +1,9 @@
 import { apiRequest, getApiBaseUrl } from '../lib/http';
 import type { AuthSession, User } from '../types';
 
+/** Centralised path constant — avoids hardcoding the string in multiple places. */
+const AUTH_ME_PATH = '/api/v1/auth/me' as const;
+
 interface AuthPayload {
   user?: User;
   accessToken?: string;
@@ -61,7 +64,7 @@ export async function completeGoogleCallback(code: string, state: string): Promi
 
 export async function getMe(): Promise<User> {
   const payload = await apiRequest<User | { user: User }>({
-    path: '/api/v1/auth/me',
+    path: AUTH_ME_PATH,
     method: 'GET'
   });
 
@@ -72,7 +75,7 @@ export async function getMe(): Promise<User> {
 }
 
 export async function getMeWithToken(accessToken: string): Promise<User> {
-  const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/me`, {
+  const response = await fetch(`${getApiBaseUrl()}${AUTH_ME_PATH}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${accessToken}`
@@ -98,8 +101,13 @@ export async function logout(refreshToken?: string): Promise<void> {
 }
 
 export async function deleteAccount(): Promise<void> {
-  await apiRequest({
-    path: '/api/v1/auth/me',
-    method: 'DELETE'
-  });
+  try {
+    await apiRequest({
+      path: AUTH_ME_PATH,
+      method: 'DELETE'
+    });
+  } catch (error) {
+    // Re-throw so the caller can handle the failure (e.g. show an error toast)
+    throw error;
+  }
 }
