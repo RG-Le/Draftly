@@ -62,8 +62,8 @@ async def async_generate_draft(thread_id: str, correlation_id: str, user_id: str
     queue="draft-queue",
     max_retries=3,
     default_retry_delay=10,
-    time_limit=60,
-    soft_time_limit=50,
+    time_limit=90,
+    soft_time_limit=80,
     rate_limit="30/m",
 )
 def generate_draft(thread_id: str, correlation_id: str, user_id: str) -> dict:

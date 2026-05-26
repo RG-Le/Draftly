@@ -169,6 +169,7 @@ export class EmailRepository {
     rawHeaders: Record<string, unknown> | null;
     receivedAt: Date;
     isSentByUser: boolean;
+    isDraft: boolean;
   }): Promise<EmailMessage> {
     // Skip if message already exists (idempotent)
     const existing = await this.findMessageByExternalId(msg.externalMessageId);
@@ -187,9 +188,28 @@ export class EmailRepository {
         raw_headers: msg.rawHeaders ? JSON.stringify(msg.rawHeaders) : null,
         received_at: msg.receivedAt,
         is_sent_by_user: msg.isSentByUser,
+        is_draft: msg.isDraft,
       })
       .returning('*');
     return this.mapMessage(created);
+  }
+
+  /**
+   * Update the body content of an existing message (used by metadata-first on-demand fetch).
+   * Identified by external_message_id (Gmail message ID).
+   * Idempotent — safe to call multiple times.
+   */
+  async updateMessageBody(
+    externalMessageId: string,
+    bodyText: string | null,
+    bodyHtml: string | null,
+  ): Promise<void> {
+    await this.db('email_messages')
+      .where({ external_message_id: externalMessageId })
+      .update({
+        body_text: bodyText,
+        body_html: bodyHtml,
+      });
   }
 
   // ========== Mappers ==========
@@ -227,6 +247,7 @@ export class EmailRepository {
         : null,
       receivedAt: row.received_at,
       isSentByUser: row.is_sent_by_user,
+      isDraft: row.is_draft,
       createdAt: row.created_at,
     };
   }

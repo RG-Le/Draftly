@@ -121,12 +121,29 @@ export async function completeConnectionCallback(
   });
 }
 
-export async function syncInbox(connectionId?: string): Promise<any> {
+/**
+ * Triggers a Gmail inbox sync.
+ *
+ * @param connectionId - Optional specific connection ID to sync.
+ * @param daysBack - Optional number of days of history to sync (must be a positive integer).
+ *                   Defaults to the server's configured default when omitted.
+ */
+export async function syncInbox(connectionId?: string, daysBack?: number): Promise<any> {
+  // Validate daysBack to prevent negative or non-integer values reaching the API.
+  const validatedDaysBack =
+    typeof daysBack === 'number' && Number.isInteger(daysBack) && daysBack > 0
+      ? daysBack
+      : undefined;
+
+  const extra: Record<string, number> = validatedDaysBack
+    ? { daysBack: validatedDaysBack, maxResults: 50 }
+    : {};
+
   if (connectionsApiMode === 'legacy') {
     return apiRequest({
       path: '/api/v1/connections/gmail/sync',
       method: 'POST',
-      body: {}
+      body: { ...extra }
     });
   }
 
@@ -134,7 +151,7 @@ export async function syncInbox(connectionId?: string): Promise<any> {
     const result = await apiRequest({
       path: '/api/v1/inbox/sync',
       method: 'POST',
-      body: connectionId ? { connectionId } : {}
+      body: { ...(connectionId ? { connectionId } : {}), ...extra }
     });
     connectionsApiMode = 'modern';
     return result;
@@ -147,7 +164,7 @@ export async function syncInbox(connectionId?: string): Promise<any> {
   const legacyResult = await apiRequest({
     path: '/api/v1/connections/gmail/sync',
     method: 'POST',
-    body: {}
+    body: { ...extra }
   });
   connectionsApiMode = 'legacy';
   return legacyResult;

@@ -138,16 +138,20 @@ Five layers, from broadest to most specific:
 
 ### Layer 1: Per-IP (DDoS protection)
 
-- **Limit**: 200 requests/minute
+- **Limit**: Configurable via `RATE_LIMIT_IP_PER_MIN` (default: 200 requests/minute)
 - **Scope**: Raw IP address
-- **Applied**: Before authentication (catches bots/scanners)
+- **Applied**: Per-route (not globally), using `ipRateLimitMiddleware`
+- **Backend**: Redis-backed via `rate-limiter-flexible`
 - **Risk**: Shared IPs (corporate NAT) may hit limit for legitimate users. Per-user limits (Layer 2) are the primary protection.
 
 ### Layer 2: Per-User (abuse prevention)
 
-- **Limit**: 100 requests/minute
+- **Limit**: Configurable via `RATE_LIMIT_USER_PER_MIN` (default: 100 requests/minute)
 - **Scope**: Authenticated user ID
-- **Applied**: After authentication
+- **Applied**: Per-route after authentication, using `userRateLimitMiddleware`
+- **Backend**: Redis-backed via `rate-limiter-flexible`
+
+> **Note:** The implementation uses two rate limit layers (IP + user) applied per-route rather than the five-layer system originally designed. Per-endpoint and cost-based limits are not yet implemented as separate middleware.
 
 ### Layer 3: Per-Endpoint (resource protection)
 
@@ -236,18 +240,15 @@ Why not just controller-level checks: A controller might forget. A repository th
 
 ```typescript
 const corsOptions = {
-  origin: [
-    'http://localhost:3001',          // Local frontend dev
-    'https://draftly.yourdomain.com', // Production frontend
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: config.CORS_ORIGINS.split(',').map(s => s.trim()),
+  // Default: 'http://localhost:3000,http://localhost:3001,http://localhost:5173'
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID'],
-  credentials: true,                 // Allow cookies/auth headers
-  maxAge: 86400,                     // Cache preflight for 24h
+  credentials: true,
 };
 ```
 
-**Why strict whitelist:** Wildcard CORS (`*`) allows any website to make authenticated requests. A banking site or phishing page could call our API if the user has a valid JWT.
+CORS origins are configurable via the `CORS_ORIGINS` environment variable (comma-separated list).
 
 ---
 
@@ -284,3 +285,44 @@ REDIS_URL=redis://localhost:6379
 - Secrets in platform-native secret store (Railway secrets, AWS Secrets Manager, Azure Key Vault)
 - Environment variables injected at deploy time
 - No `.env` files in production
+
+---
+
+## Account Deletion
+
+`DELETE /api/v1/auth/me` permanently removes the authenticated user's account and all associated data.
+
+**Cascade behavior:**
+- All refresh tokens revoked from Redis before DB deletion
+- `user_connections` → `email_threads` → `email_messages`, `triage_results`, `drafts` (CASCADE)
+- `user_profiles`, `user_preferences`, `usage_records`, `draft_actions` (CASCADE)
+- Single `DELETE FROM users WHERE id = $userId` triggers all cascades
+
+**Security:**
+- Protected by `requireAuth` + `userRateLimitMiddleware`
+- Only deletes the authenticated user's own account (userId from JWT)
+- No admin override — users can only delete themselves
+
+---
+
+## Input Validation (Zod)
+
+Profile and preference endpoints use Zod schemas for server-side validation:
+
+| Endpoint | Validated Fields |
+|----------|-----------------|
+| `PUT /profile` | `preferredTone` (enum whitelist), `personalizedProfile` (max 2000 chars), `signatureTemplate` (max 500 chars) |
+| `PUT /preferences/triage` | `customInstructions` (string, max 500 chars) |
+| `PUT /preferences/auto-sync` | `enabled` (boolean), `intervalHours` (integer 1–168) |
+
+Validation errors return 400 with field-level details:
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "preferredTone: Invalid enum value. Expected 'professional' | 'casual' | 'friendly' | 'formal' | 'concise'"
+  }
+}
+```
+
+**Note:** Knex.js parameterizes all queries automatically — SQL injection is not a concern. Zod validation is for data integrity and prompt injection prevention (user profile text is injected into LLM prompts).

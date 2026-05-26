@@ -9,6 +9,8 @@ import { connectionsRouter } from './routes/connections.js';
 import { inboxRouter } from './routes/inbox.js';
 import { historyRouter } from './routes/history.js';
 import { profileRouter } from './routes/profile.js';
+import { preferencesRouter } from './routes/preferences.js';
+import { usageRouter } from './routes/usage.js';
 import { configurePassport } from '../auth/google-strategy.js';
 import { EnvConfig } from '../../config/index.js';
 import passport from 'passport';
@@ -31,10 +33,7 @@ export function createApp(_config: EnvConfig): express.Application {
   // 4. CORS whitelist
   app.use(
     cors({
-      origin: function (_origin, callback) {
-        // Temporarily allow all origins for UI development
-        callback(null, true);
-      },
+      origin: _config.CORS_ORIGINS.split(',').map((o) => o.trim()),
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
       allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'Accept'],
       credentials: true,
@@ -55,6 +54,8 @@ export function createApp(_config: EnvConfig): express.Application {
   app.use('/api/v1/inbox', inboxRouter);
   app.use('/api/v1/profile', profileRouter);
   app.use('/api/v1/history', historyRouter);
+  app.use('/api/v1/preferences', preferencesRouter);
+  app.use('/api/v1/usage', usageRouter);
 
   // --- Global error handler (must be last) ---
   app.use(errorHandler);

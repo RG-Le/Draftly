@@ -32,42 +32,69 @@ It does **not** run any AI/LLM logic. That's the AI Engine's job.
 
 ```
 gateway/src/
-├── index.ts                          # Starts Express + BullMQ workers
-├── config/                           # Environment parsing (Zod validated)
+├── index.ts                          # Starts Express + BullMQ workers + WebSocket
+├── config/
+│   └── index.ts                      # Zod-validated environment parsing
 │
-├── domain/                           # Pure business logic, zero dependencies
-│   ├── entities/                     # User, Draft, Thread, SendAttempt, etc.
-│   ├── value-objects/                # DraftStatus (state machine), IdempotencyKey
-│   └── errors/                       # ConcurrencyConflictError, DuplicateSendError
+├── domain/                           # Business logic and entities
+│   ├── entities/
+│   │   └── index.ts                  # User, UserConnection, EmailThread, EmailMessage, Draft, etc.
+│   ├── errors/
+│   │   └── index.ts                  # ValidationError, NotFoundError, AuthenticationError, etc.
+│   ├── auth/
+│   │   └── token.service.ts          # JWT token creation and verification (RS256)
+│   ├── connectors/
+│   │   ├── connection.repository.ts  # UserConnection CRUD
+│   │   ├── email.repository.ts       # Thread/message/triage/draft queries
+│   │   ├── gmail.adapter.ts          # Gmail API sync logic
+│   │   └── registry.ts              # ConnectorRegistry (enabled connectors)
+│   └── users/
+│       └── repository.ts             # User CRUD
 │
-├── application/                      # Use cases — orchestration logic
-│   ├── auth/                         # GoogleLoginUseCase, RegisterUseCase
-│   ├── connections/                  # InitiateConnectionUseCase, HandleOAuthCallback
-│   ├── inbox/                        # SyncInboxUseCase, GetThreadsUseCase
-│   ├── drafts/                       # EditDraft, ApproveDraft, RejectDraft
-│   ├── send/                         # SendReplyUseCase (idempotent)
-│   ├── billing/                      # GetUsageSummary, RecordUsage
-│   └── profile/                      # GetProfile, UpdatePreferences
+├── infrastructure/
+│   ├── http/
+│   │   ├── app.ts                    # Express app setup, middleware, route mounting
+│   │   ├── routes/
+│   │   │   ├── auth.ts              # Google OAuth + local auth + JWT refresh
+│   │   │   ├── connections.ts       # Gmail OAuth, sync, threads, drafts, approve/reject
+│   │   │   ├── health.ts           # Health check endpoint
+│   │   │   ├── history.ts          # Send history
+│   │   │   ├── inbox.ts            # Unified inbox view
+│   │   │   ├── preferences.ts      # User preferences CRUD
+│   │   │   ├── profile.ts          # Communication profile GET/PUT/DELETE
+│   │   │   └── usage.ts            # Usage metrics and cost tracking
+│   │   └── middleware/
+│   │       ├── auth.ts              # JWT verification (requireAuth)
+│   │       ├── correlation.ts       # Correlation ID generation
+│   │       ├── error-handler.ts     # Global error handler
+│   │       ├── rate-limiter.ts      # IP + user rate limiting (Redis-backed)
+│   │       ├── request-logger.ts    # Request logging
+│   │       └── index.ts            # Middleware exports
+│   ├── database/
+│   │   └── connection.ts            # Knex.js instance + migrations
+│   ├── encryption/
+│   │   └── index.ts                 # AES-256-GCM encrypt/decrypt
+│   ├── redis/
+│   │   └── connection.ts            # ioredis connection
+│   ├── socket/
+│   │   └── websocket.ts            # Socket.IO + Redis pub/sub listener
+│   └── workers/
+│       ├── auto-sync.service.ts     # Scheduled auto-sync service
+│       ├── celery-bridge.ts         # Celery v2 protocol message builder
+│       ├── draft-sync.worker.ts     # Sync drafts to Gmail drafts folder
+│       ├── gmail-sync.worker.ts     # BullMQ worker for Gmail inbox sync
+│       └── send-reply.worker.ts     # BullMQ worker for sending approved replies
 │
-├── infrastructure/                   # Framework + external implementations
-│   ├── http/                         # Express server, routes, middleware, validators
-│   ├── websocket/                    # Socket.IO + Redis pub/sub listener
-│   ├── database/                     # Knex instance, migrations, repositories
-│   ├── connectors/                   # ConnectorRegistry, Gmail services
-│   ├── encryption/                   # AES-256-GCM service
-│   ├── queue/                        # BullMQ manager, CeleryBridge, job handlers
-│   └── metrics/                      # Prometheus client
-│
-└── shared/                           # Logger, utils, pagination
+└── shared/
+    └── logger.ts                     # Pino logger configuration
 ```
 
 ### Layer Rules
-- **Domain** imports nothing from other layers. No `express`, no `knex`, no `redis`.
-- **Application** imports from Domain only. Receives repositories/services via constructor injection.
-- **Infrastructure** imports from Application and Domain. Implements the actual I/O.
-- **Shared** is used by all layers (logger, utils).
+- **Domain** contains entities, repositories, and business logic. No Express or infrastructure dependencies.
+- **Infrastructure** implements I/O: HTTP routes, database, Redis, workers, encryption.
+- **Shared** is used by all layers (logger).
 
-This isn't pedantic — it means you can unit test any Use Case by injecting a mock repository. No database, no Redis, no network.
+> **Note:** The implementation does not have a separate `application/` use-case layer. Business logic is implemented directly in route handlers and workers, with repositories handling data access.
 
 ---
 
@@ -123,10 +150,54 @@ This avoids any synchronous HTTP dependency between Node and Python. Node writes
 
 | Worker | Queue | Concurrency | Purpose |
 |--------|-------|-------------|---------|
-| SyncWorker | `gmail-sync-queue` | 10 | Fetches emails from Gmail, stores in DB, enqueues triage |
-| SendWorker | `gmail-send-queue` | 5 | Dispatches approved replies via Gmail API |
-| ScheduledSync | `sync-scheduler` | 1 (repeatable) | Triggers sync for active connections every 5 min |
-| TokenRefresh | `token-refresh-queue` | 3 | Proactively refreshes expiring OAuth tokens |
+| GmailSyncWorker | `gmail-sync` | 5 | Fetches emails from Gmail, stores in DB, dispatches batch triage + profile build |
+| SendReplyWorker | `gmail-send` | 5 | Dispatches approved replies via Gmail API |
+| DraftSyncWorker | `draft-sync` | — | Syncs draft content to Gmail drafts folder (create/update/delete) |
+| AutoSyncService | — | — | Scheduled auto-sync for active connections |
+
+The Gmail sync worker also handles:
+- Job deduplication by connectionId (only one active sync per connection)
+- Automatic batch triage dispatch for unclassified threads after sync
+- Profile build dispatch if user profile hasn't been calibrated yet
+- **BullMQ job dedup fix:** removes completed jobs before re-adding to prevent stale job conflicts
+
+---
+
+## Metadata-First Sync Architecture
+
+The gateway uses a **metadata-first** approach to Gmail sync, significantly reducing initial sync time and API quota usage.
+
+### How it works
+
+1. **During sync** (`syncRecentThreads`): Gmail threads are fetched with `format: 'metadata'` — only headers (From, To, Cc, Subject) and metadata (dates, labels) are retrieved. Message bodies are **not** fetched. This is 10–50x faster than fetching full content.
+
+2. **On-demand body fetch** (`fetchThreadFull`): When a user views a thread detail or triggers draft generation, the gateway checks if messages have body content. If not, it calls `GmailAdapter.fetchThreadFull(externalThreadId)` which:
+   - Fetches the thread with `format: 'full'` from Gmail API
+   - Extracts `bodyText` and `bodyHtml` from the message payload
+   - Updates existing message rows in DB via `EmailRepository.updateMessageBody()`
+
+3. **Caching**: Once fetched, body content is persisted in the database. Subsequent accesses are instant (no Gmail API call needed).
+
+### Key methods
+
+| Method | Location | Purpose |
+|--------|----------|---------|
+| `syncRecentThreads(maxResults, daysBack, onPageSynced)` | `GmailAdapter` | Fetches thread metadata only, stores headers/participants/dates |
+| `fetchThreadFull(externalThreadId)` | `GmailAdapter` | On-demand full body fetch, updates DB messages |
+| `updateMessageBody(externalMessageId, bodyText, bodyHtml)` | `EmailRepository` | Updates cached body content for a message |
+
+### Smart daysBack optimization
+
+The sync endpoint accepts `daysBack` (1–15, default 7). The Gmail sync worker applies smart optimization:
+- If the database already has synced threads and the last sync was recent, the effective `daysBack` may be reduced internally to only fetch threads since the last sync timestamp
+- This reduces redundant Gmail API calls on frequent syncs
+
+### Where body is fetched before dispatch
+
+- `GET /connections/:type/threads/:id` — fetches body if messages lack content (transparent to client)
+- `POST /connections/:type/threads/:id/draft` — fetches body before dispatching Celery draft task
+- `POST /connections/:type/threads/:id/regenerate` — fetches body before dispatching regeneration task
+- Profile pipeline — sent email bodies fetched before profile build dispatch
 
 ### WebSocket Manager
 
@@ -176,11 +247,15 @@ app.use(correlationMiddleware);     // 1. Generate/propagate correlation ID
 app.use(requestLoggerMiddleware);   // 2. Log every request (with correlation ID)
 app.use(helmet());                  // 3. Security headers
 app.use(cors(corsOptions));         // 4. CORS whitelist
-app.use(ipRateLimiter);            // 5. Per-IP rate limit (200/min)
-app.use(express.json({ limit: '1mb' }));  // 6. Body parsing with size limit
-// Auth middleware is applied per-route group, not globally
-// Endpoint-specific rate limiters are applied per-route
+app.use(express.json({ limit: '1mb' }));  // 5. Body parsing with size limit
+// Auth + rate limiting middleware applied per-route, not globally
+// ipRateLimitMiddleware: Per-IP (configurable, default 200/min)
+// userRateLimitMiddleware: Per-user (configurable, default 100/min)
 ```
+
+Rate limiting uses `rate-limiter-flexible` with Redis backend (not `express-rate-limit`). Limits are configurable via environment variables:
+- `RATE_LIMIT_IP_PER_MIN` (default: 200)
+- `RATE_LIMIT_USER_PER_MIN` (default: 100)
 
 ---
 

@@ -59,6 +59,7 @@ export interface EmailMessage {
   rawHeaders: Record<string, unknown> | null;
   receivedAt: Date;
   isSentByUser: boolean;
+  isDraft: boolean;
   createdAt: Date;
 }
 

@@ -15,7 +15,28 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     settings = get_settings()
     logger.info("ai_engine.starting", primary_model=settings.llm_primary_model)
+    
+    # --- LLM Startup Health Check ---
+    from src.infrastructure.llm.llm_service import LLMService
+    llm = LLMService()
+    test_kwargs = {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}
+    
+    try:
+        logger.info("ai_engine.startup_check", msg=f"Verifying primary model: {llm.primary_model}")
+        await llm._call_model(llm.primary_model, test_kwargs)
+        logger.info("ai_engine.startup_check", msg="Primary model OK")
+    except Exception as e:
+        logger.error("ai_engine.startup_check", msg=f"Primary model ({llm.primary_model}) failed", error=str(e))
+        try:
+            logger.info("ai_engine.startup_check", msg=f"Verifying fallback model: {llm.fallback_model}")
+            await llm._call_model(llm.fallback_model, test_kwargs)
+            logger.info("ai_engine.startup_check", msg="Fallback model OK")
+        except Exception as e2:
+            logger.critical("ai_engine.startup_check", msg="BOTH primary and fallback models failed!", error=str(e2))
+    # --------------------------------
+    
     yield
+    
     # Dispose DB engine on shutdown
     engine = get_engine()
     await engine.dispose()

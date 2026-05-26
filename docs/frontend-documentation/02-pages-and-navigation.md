@@ -63,7 +63,7 @@ All routes below use **`RequireAuth`** + nested layout **`AppLayout`**.
 | `/app/drafts` | `DraftsPage` | Cross-thread draft queue view |
 | `/app/sent` | `SentPage` | Send history |
 | `/app/usage` | `UsagePage` | Usage summaries / records (`api/usage.ts`) |
-| `/app/settings` | `SettingsPage` | Gmail connect/sync/reconnect, profile/preferences |
+| `/app/settings` | `SettingsPage` | Gmail connect/sync/reconnect, profile/preferences, triage settings, delete account |
 
 ## `AppLayout` responsibilities
 
@@ -76,3 +76,67 @@ Beyond rendering children via `<Outlet />`, **`AppLayout`** is the operational h
 - **ConnectionBanner** always visible above routed content.
 
 Fallthrough: **`NotFoundPage`** for unknown paths.
+
+---
+
+## `InboxPage` details
+
+The inbox is the primary workspace view with a two-panel layout: thread list (left) and thread detail (right).
+
+### Pagination
+
+Thread list uses offset-based pagination with `PAGE_LIMIT = 20`:
+- **Previous / Next** buttons below the thread list
+- Page resets to 1 when the category filter changes
+- "Next" is disabled when fewer than `PAGE_LIMIT` threads are returned
+
+### Category filter
+
+The filter is a **dropdown `<select>`** (not chips) with the following options:
+- All (default, empty string)
+- Reply Needed (`reply_needed`)
+- Info (`info`)
+- Promotions (`promotions`)
+- Urgent (`urgent`)
+- Spam (`spam`)
+
+### Thread detail panel
+
+When a thread is selected:
+- Shows subject, message count, triage badge, confidence score
+- **Re-classify** button triggers manual re-triage
+- **Message Timeline** shows chronological messages
+- **DraftEditor** or "Generate draft" empty state
+
+---
+
+## `SettingsPage` details
+
+The settings page is organized into multiple panel sections:
+
+### Connection section
+- Gmail connect/reconnect/disconnect buttons
+- **Sync daysBack dropdown** (1, 3, 7, 10, 15 days) next to "Sync now" button
+- Connection status badge
+
+### Writing Profile section
+- Preferred tone dropdown (professional, friendly, concise, formal)
+- Personalized profile textarea
+- Signature template textarea
+- "Regenerate Profile" button (dispatches AI profile rebuild)
+
+### Email Sync section
+- Auto-sync toggle (enabled/disabled)
+- Sync interval dropdown (1h to 7 days)
+- Last synced timestamp
+
+### Triage Settings section
+- **Custom Instructions** textarea with 500-character limit
+- Character counter displayed below (`{length}/500`)
+- "Save triage instructions" button
+- **Active Categories** display: dynamically loaded from `getTriageCategories()`, shows each category with a Badge and description. System categories (reply_needed, info, promotions) are labeled with a "System" indicator. Non-system categories (already_replied, junk) are shown without the system label.
+
+### Danger Zone section
+- **Delete Account** button opens a confirmation Dialog
+- Confirmation dialog explains the action is permanent and irreversible
+- On confirmation, calls `deleteAccount()`, clears session, and navigates to landing page

@@ -1,5 +1,5 @@
 import { ApiError, apiRequest } from '../lib/http';
-import type { ProfileData, UserPreference } from '../types';
+import type { AutoSyncPreference, ProfileData, UserPreference } from '../types';
 
 function mapProfile(raw: any): ProfileData {
   if (!raw || typeof raw !== 'object') return {};
@@ -18,7 +18,9 @@ function mapProfile(raw: any): ProfileData {
     communicationNorms: raw.communicationNorms || raw.communication_norms,
     profileVersion: raw.profileVersion || raw.profile_version,
     confidenceScore: raw.confidenceScore || raw.confidence_score,
-    lastCalibratedAt: raw.lastCalibratedAt || raw.last_calibrated_at || null
+    lastCalibratedAt: raw.lastCalibratedAt || raw.last_calibrated_at || null,
+    profileSource: raw.profileSource || raw.profile_source || 'default',
+    isAiGenerated: raw.isAiGenerated ?? raw.is_ai_generated ?? false
   };
 }
 
@@ -91,4 +93,77 @@ export async function updatePreference(key: string, value: unknown): Promise<voi
     method: 'PUT',
     body: { key, value }
   });
+}
+
+export async function getAutoSyncPreference(): Promise<AutoSyncPreference> {
+  try {
+    const payload = await apiRequest<any>({
+      path: '/api/v1/preferences/auto-sync',
+      method: 'GET'
+    });
+    return {
+      enabled: Boolean(payload.enabled ?? payload.autoSync ?? false),
+      intervalHours: Number(payload.intervalHours ?? payload.interval_hours ?? 24),
+      lastSyncAt: payload.lastSyncAt ?? payload.last_sync_at ?? null,
+      gmailConnected: payload.gmailConnected ?? payload.gmail_connected ?? true
+    };
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      return { enabled: false, intervalHours: 24, lastSyncAt: null, gmailConnected: false };
+    }
+    throw error;
+  }
+}
+
+export async function updateAutoSyncPreference(data: { enabled: boolean; intervalHours: number }): Promise<void> {
+  try {
+    await apiRequest({
+      path: '/api/v1/preferences/auto-sync',
+      method: 'PUT',
+      body: { enabled: data.enabled, intervalHours: data.intervalHours }
+    });
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      await updatePreference('autoSync', data.enabled);
+      await updatePreference('autoSyncIntervalHours', data.intervalHours);
+      return;
+    }
+    throw error;
+  }
+}
+
+export async function regenerateProfile(): Promise<void> {
+  await apiRequest({
+    path: '/api/v1/profile/regenerate',
+    method: 'POST',
+    body: {}
+  });
+}
+
+// ── Triage Preferences ────────────────────────────────────────────────────────
+
+export async function getTriagePreferences(): Promise<{ customInstructions: string | null }> {
+  try {
+    const payload = await apiRequest<any>({
+      path: '/api/v1/preferences/triage',
+      method: 'GET'
+    });
+    return {
+      customInstructions: payload.customInstructions ?? null
+    };
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      return { customInstructions: null };
+    }
+    throw error;
+  }
+}
+
+export async function updateTriagePreferences(data: { customInstructions: string }): Promise<any> {
+  const payload = await apiRequest<any>({
+    path: '/api/v1/preferences/triage',
+    method: 'PUT',
+    body: { customInstructions: data.customInstructions }
+  });
+  return payload;
 }

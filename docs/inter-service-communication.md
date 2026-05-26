@@ -11,6 +11,7 @@ Two services (Node.js Gateway, Python AI Engine) need to coordinate work. They s
 | Interaction | Pattern | Mechanism | Direction |
 |-------------|---------|-----------|-----------|
 | Enqueue AI work (triage, draft, profile) | Async job queue | Redis (Celery protocol) | Node → Python |
+| Wakeup AI Engine from scale-to-zero | HTTP GET fire-and-forget | FastAPI `/ping` | Node → Python |
 | Notify user of AI results | Pub/sub event | Redis pub/sub | Python → Node |
 | Share data (threads, drafts, profiles) | Shared database | PostgreSQL | Both read/write |
 | Health check Python service | HTTP GET | FastAPI `/health` | Node → Python |
@@ -41,7 +42,40 @@ Node enqueues jobs for Python by writing Celery-compatible messages to Redis. Th
 Node.js CeleryBridge → Redis LPUSH to queue key → Celery worker BRPOP from same key
 ```
 
+### CeleryBridge Methods
+
+```typescript
+class CeleryBridge {
+  dispatchTriageTask({ threadId, userId, correlationId }): Promise<string>;
+  dispatchTriageBatchTask({ threadIds, userId, correlationId }): Promise<string>;
+  dispatchDraftTask({ threadId, userId, correlationId }): Promise<string>;
+  dispatchProfileUpdateTask({ userId, draftId, correlationId }): Promise<string>;
+  dispatchProfileBuildTask({ userId, correlationId }): Promise<string>;
+  private pingAiWorker(): Promise<void>;  // Fire-and-forget wakeup
+}
+```
+
+### Wakeup Ping (Scale-to-Zero)
+
+Because the AI Engine runs on Cloud Run with `min-instances=0`, its container may be frozen when a task is dispatched. To minimise cold-start latency, `CeleryBridge` sends a `GET /ping` to the AI Engine's FastAPI endpoint **immediately after** every `LPUSH` to Redis:
+
+```
+CeleryBridge.dispatchXxxTask()
+  ├─ LPUSH job → Redis  (task queued)
+  └─ GET /ping → AI Engine (async, fire-and-forget, up to 3 retries × 500 ms)
+                   └─ Container wakes up in ~2s
+                   └─ Celery BRPOP picks up job and processes it
+```
+
+Ping failures are **logged as warnings and never block dispatch** — the Celery retry mechanism (`max_retries=2`) provides the safety net if the worker is momentarily unready.
+
+The `AI_WORKER_URL` environment variable controls where the ping is sent:
+- **Local Docker:** `http://ai-engine-api:8000` (Docker network hostname)
+- **Cloud Run:** `https://draftly-ai-worker-XXXXX.a.run.app` (set via `--update-env-vars`)
+
 ### Message format
+
+The CeleryBridge builds Celery v2 protocol messages with base64-encoded body:
 
 ```json
 {
@@ -65,9 +99,13 @@ Node.js CeleryBridge → Redis LPUSH to queue key → Celery worker BRPOP from s
 
 | Queue | Tasks | Consumer |
 |-------|-------|----------|
-| `triage-queue` | `ai.triage.classify` | Python Celery worker |
+| `triage-queue` | `ai.triage.classify`, `ai.triage.classify_batch` | Python Celery worker |
 | `draft-queue` | `ai.draft.generate` | Python Celery worker |
-| `profile-queue` | `ai.profile.update` | Python Celery worker |
+| `profile-queue` | `ai.profile.build` | Python Celery worker |
+
+### Batch Triage
+
+The primary triage path uses batch classification. After Gmail sync, the gateway collects all unclassified thread IDs and dispatches them in chunks (configurable via `TRIAGE_BATCH_SIZE`, default 25). The batch task classifies multiple threads in a single LLM call, significantly reducing cost and latency.
 
 ### Failure handling
 
@@ -109,10 +147,16 @@ Single channel: `draftly:events`
 
 | Event | When | Contains |
 |-------|------|----------|
-| `triage:completed` | Triage pipeline finishes | threadId, classification, confidence |
-| `draft:ready` | Draft generation succeeds | draftId, threadId, subject |
-| `draft:failed` | Draft generation fails | draftId, threadId, error |
-| `profile:updated` | Profile update applied | userId, fieldsChanged |
+| `triage:started` | Triage task begins | userId, threadId, correlationId |
+| `triage:completed` | Triage pipeline finishes | userId, threadId, correlationId, classification, confidence, reasoning |
+| `triage:batch_started` | Batch triage begins | userId, threadCount, correlationId |
+| `triage:batch_completed` | Batch triage finishes | userId, results (array of thread classifications) |
+| `triage:batch_retrying` | Batch triage retry | userId, attempt, maxAttempts, retryInSeconds |
+| `triage:batch_failed` | Batch triage permanently failed | userId, error, threadCount, permanent |
+| `draft:ready` | Draft generation succeeds | userId, draftId, threadId |
+| `draft:failed` | Draft generation fails | userId, threadId, error |
+| `profile:updated` | Profile update applied | userId |
+| `profile_generated` | Profile pipeline completed | userId |
 
 ### Node-side handling
 

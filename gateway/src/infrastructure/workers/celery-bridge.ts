@@ -99,6 +99,34 @@ export class CeleryBridge {
   }
 
   /**
+   * Dispatch a batch triage task — classifies multiple threads in a single LLM call.
+   */
+  async dispatchTriageBatchTask(params: {
+    threadIds: string[];
+    userId: string;
+    correlationId: string;
+  }): Promise<string> {
+    const taskId = uuidv4();
+
+    const message = this.buildCeleryMessage({
+      taskId,
+      taskName: 'ai.triage.classify_batch',
+      queue: 'triage-queue',
+      args: [params.threadIds, params.correlationId, params.userId],
+      kwargs: {},
+    });
+
+    await this.publishToQueue('triage-queue', message);
+
+    logger.info(
+      { taskId, threadCount: params.threadIds.length, queue: 'triage-queue' },
+      'CeleryBridge: batch triage task dispatched',
+    );
+
+    return taskId;
+  }
+
+  /**
    * Dispatch a profile build task (initial persona bootstrap from sent emails).
    */
   async dispatchProfileBuildTask(params: {
@@ -181,6 +209,41 @@ export class CeleryBridge {
 
   private async publishToQueue(queue: string, message: string): Promise<void> {
     // Celery with Redis broker uses LPUSH to the queue key
-    await this.redis.lpush(queue, message);
+    const queueLength = await this.redis.lpush(queue, message);
+    logger.debug({ queue, queueDepth: queueLength }, 'CeleryBridge: message pushed to Redis queue');
+
+    // Ping the AI Worker to wake it up (for scale-to-zero serverless environments)
+    this.pingAiWorker();
+  }
+
+  private pingAiWorker(): void {
+    const aiWorkerUrl = process.env.AI_WORKER_URL; // Using process.env to avoid circular dependency if loadConfig is not imported
+    if (!aiWorkerUrl) {
+       logger.debug('CeleryBridge: AI_WORKER_URL not configured, skipping wakeup ping');
+       return;
+    }
+
+    // Fire and forget, but handle basic retries
+    const attemptPing = async (retries = 3) => {
+      const endpoint = `${aiWorkerUrl.replace(/\/+$/, '')}/ping`;
+      for (let i = 0; i < retries; i++) {
+        try {
+          // Dynamic import for node-fetch or just use global fetch if available (Node 18+)
+          const res = await fetch(endpoint, { method: 'GET', timeout: 5000 } as any);
+          if (res.ok) {
+            logger.info('CeleryBridge: successfully pinged AI Worker to wake it up');
+            return;
+          }
+          logger.warn({ status: res.status }, `CeleryBridge: AI Worker ping returned non-OK status (Attempt ${i + 1}/${retries})`);
+        } catch (err: any) {
+          logger.warn({ error: err.message }, `CeleryBridge: AI Worker ping failed (Attempt ${i + 1}/${retries})`);
+        }
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      logger.error('CeleryBridge: AI Worker failed to respond to ping after retries. Tasks may be delayed.');
+    };
+
+    attemptPing().catch(err => logger.error({ error: err.message }, 'CeleryBridge: Unhandled error in attemptPing'));
   }
 }

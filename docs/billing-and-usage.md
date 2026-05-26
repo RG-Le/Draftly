@@ -65,59 +65,34 @@ This is manageable. The hybrid triage (heuristic saves ~60% of LLM calls) is the
 
 ### Where recording happens
 
-**Python AI Engine** — after every LLM call:
+**Python AI Engine** — LLM metadata is stored inline with each result:
 
-```python
-async def record_llm_usage(
-    user_id: str,
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    estimated_cost: Decimal,
-    correlation_id: str,
-):
-    await usage_repo.insert({
-        "user_id": user_id,
-        "resource_type": "llm_input_tokens",
-        "resource_detail": model,
-        "quantity": input_tokens,
-        "estimated_cost_usd": estimated_cost * Decimal("0.3"),  # Rough input ratio
-        "usage_date": date.today(),
-        "correlation_id": correlation_id,
-    })
-    await usage_repo.insert({
-        "user_id": user_id,
-        "resource_type": "llm_output_tokens",
-        "resource_detail": model,
-        "quantity": output_tokens,
-        "estimated_cost_usd": estimated_cost * Decimal("0.7"),  # Rough output ratio
-        "usage_date": date.today(),
-        "correlation_id": correlation_id,
-    })
-```
+- **Triage results**: `triage_results.llm_metadata` JSONB column stores `{ model, input_tokens, output_tokens, cost }`
+- **Drafts**: `drafts.generation_metadata` JSONB column stores `{ model, input_tokens, output_tokens, cost }`
 
-**Node Gateway** — after every Gmail API call:
+This approach avoids separate `usage_records` table writes on every operation while still enabling accurate aggregation.
 
-```typescript
-await usageRepo.insert({
-  userId,
-  resourceType: 'gmail_api_call',
-  resourceDetail: 'messages.list',
-  quantity: 1,
-  estimatedCostUsd: 0,
-  usageDate: new Date(),
-  correlationId,
-});
+**Node Gateway** — The usage endpoint (`GET /api/v1/usage`) aggregates costs directly from these JSONB columns:
+
+```sql
+-- Triage cost aggregation
+SELECT 
+  SUM(CAST(llm_metadata->>'cost' AS FLOAT)) as triage_cost,
+  SUM(CAST(llm_metadata->>'input_tokens' AS INTEGER)) as triage_input,
+  SUM(CAST(llm_metadata->>'output_tokens' AS INTEGER)) as triage_output
+FROM triage_results ...
+
+-- Draft cost aggregation  
+SELECT
+  SUM(CAST(generation_metadata->>'cost' AS FLOAT)) as draft_cost,
+  SUM(CAST(generation_metadata->>'input_tokens' AS INTEGER)) as draft_input,
+  SUM(CAST(generation_metadata->>'output_tokens' AS INTEGER)) as draft_output
+FROM drafts ...
 ```
 
 ### Performance consideration
 
-Usage recording is a DB write on every operation. At 4500 LLM calls/hour, that's 9000 usage records/hour (input + output tokens tracked separately).
-
-Mitigations:
-- `usage_records` is partitioned by `usage_date` — monthly partitions keep table sizes manageable.
-- Inserts are append-only (no updates, no locks).
-- Can batch inserts if needed (accumulate in Redis counter, flush to DB every minute).
+No separate usage table writes means zero additional DB pressure per LLM call. Aggregation queries run on-demand when the user views the usage page, with period filtering (7d/30d/90d/all) to keep query scope bounded.
 
 ---
 

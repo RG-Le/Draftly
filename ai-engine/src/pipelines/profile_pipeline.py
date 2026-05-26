@@ -16,6 +16,7 @@ class ProfileResponse(BaseModel):
     greeting_style: Dict[str, Any]
     closing_style: Dict[str, Any]
     preferred_tone: str
+    personalized_profile: str
     communication_norms: Dict[str, Any]
     confidence_score: float
 
@@ -89,7 +90,8 @@ class LLMProfileGenerationStage(Stage):
             ctx.data['profile'] = {
                 "greeting_style": {"formal": True, "common_phrases": ["Hello", "Hi"]},
                 "closing_style": {"formal": True, "common_phrases": ["Best regards", "Thanks"]},
-                "preferred_tone": "professional, concise, and helpful",
+                "preferred_tone": "professional",
+                "personalized_profile": "Write professionally and clearly. Keep responses concise and to the point.",
                 "communication_norms": {"uses_bullet_points": False, "sentence_length": "medium"},
                 "confidence_score": 0.5
             }
@@ -100,7 +102,8 @@ class LLMProfileGenerationStage(Stage):
             "Extract their core writing style. Return a structured JSON containing:\n"
             "- greeting_style: e.g. {'formal': False, 'common_phrases': ['Hi team', 'Hey']}\n"
             "- closing_style: e.g. {'formal': True, 'common_phrases': ['Best,', 'Thanks,']}\n"
-            "- preferred_tone: A string summarizing their tone (e.g., 'direct, concise, friendly')\n"
+            "- preferred_tone: MUST be exactly one of: 'professional', 'friendly', 'concise', or 'formal'.\n"
+            "- personalized_profile: A detailed paragraph describing how the user writes (e.g. 'Write professionally and clearly. Keep responses concise...').\n"
             "- communication_norms: Any recurring patterns (e.g., {'uses_bullet_points': True, 'sentence_length': 'short'})\n"
             "- confidence_score: Float between 0.0 and 1.0 representing how confident you are in this analysis."
         )
@@ -134,13 +137,18 @@ class SaveProfileStage(Stage):
         
         session_factory = get_session_factory()
         async with session_factory() as session:
+            is_cold_start = ctx.data.get('is_cold_start', True)
+            profile_source = 'default' if is_cold_start else 'ai_generated'
+
             stmt = insert(UserProfile).values(
                 user_id=ctx.user_id,
                 greeting_style=profile.get('greeting_style'),
                 closing_style=profile.get('closing_style'),
                 preferred_tone=profile.get('preferred_tone'),
+                personalized_profile=profile.get('personalized_profile'),
                 communication_norms=profile.get('communication_norms'),
                 confidence_score=profile.get('confidence_score', 0.0),
+                profile_source=profile_source,
                 profile_version=1
             ).on_conflict_do_update(
                 index_elements=['user_id'],
@@ -148,10 +156,16 @@ class SaveProfileStage(Stage):
                     'greeting_style': profile.get('greeting_style'),
                     'closing_style': profile.get('closing_style'),
                     'preferred_tone': profile.get('preferred_tone'),
+                    'personalized_profile': profile.get('personalized_profile'),
                     'communication_norms': profile.get('communication_norms'),
                     'confidence_score': profile.get('confidence_score', 0.0),
+                    'profile_source': profile_source,
                     'profile_version': UserProfile.profile_version + 1,
-                    'updated_at': func.now()
+                    'updated_at': func.now(),
+                    **(
+                        {} if is_cold_start
+                        else {'last_calibrated_at': func.now()}
+                    )
                 }
             )
             

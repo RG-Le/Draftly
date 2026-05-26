@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { completeGoogleCallback, getMeWithToken } from '../api/auth';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 
 export function AuthCallbackPage() {
-  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { setSession } = useAuth();
   const { pushToast } = useToast();
@@ -14,11 +13,14 @@ export function AuthCallbackPage() {
 
   useEffect(() => {
     const run = async () => {
-      const code = searchParams.get('code');
-      const state = searchParams.get('state');
-      const accessToken = searchParams.get('accessToken');
-      const refreshToken = searchParams.get('refreshToken');
-      const error = searchParams.get('error');
+      const queryParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+
+      const code = queryParams.get('code');
+      const state = queryParams.get('state');
+      const accessToken = hashParams.get('accessToken');
+      const refreshToken = hashParams.get('refreshToken');
+      const error = hashParams.get('error') || queryParams.get('error');
 
       if (error) {
         setStatus('error');
@@ -52,7 +54,7 @@ export function AuthCallbackPage() {
     };
 
     void run();
-  }, [searchParams, setSession, navigate, pushToast]);
+  }, [setSession, navigate, pushToast]);
 
   if (status === 'working') {
     return (

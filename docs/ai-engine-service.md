@@ -30,49 +30,41 @@ It does **not** serve user-facing APIs (except health/admin). It does **not** to
 
 ```
 ai-engine/src/
-├── main.py                           # FastAPI app (health, admin, Flower redirect)
+├── main.py                           # FastAPI app (health endpoint)
 ├── celery_app.py                     # Celery configuration + task discovery
+├── __init__.py
 │
 ├── config/
+│   ├── __init__.py
 │   ├── settings.py                   # Pydantic Settings from env
-│   └── database.py                   # SQLAlchemy async engine + session factory
+│   ├── database.py                   # SQLAlchemy async engine + session factory
+│   └── triage_categories.json        # Triage classification categories config
 │
-├── domain/
-│   ├── models.py                     # Pydantic models mirroring DB entities
-│   └── enums.py                      # TriageClassification, DraftStatus
+├── infrastructure/
+│   ├── database/
+│   │   └── models.py                 # SQLAlchemy ORM models (User, EmailThread, Draft, etc.)
+│   ├── llm/
+│   │   ├── llm_service.py            # LLMService (LiteLLM wrapper with primary/fallback)
+│   │   └── prompt_manager.py         # PromptManager (Redis cache → DB → code fallback)
+│   └── redis/
+│       ├── connection.py             # Redis async connection
+│       └── event_publisher.py        # Redis pub/sub event publisher
 │
 ├── pipelines/                        # Composable workflow pipelines
-│   ├── base.py                       # Pipeline, Stage, PipelineContext ABCs
-│   ├── triage/                       # Triage pipeline stages
-│   ├── draft/                        # Draft generation pipeline stages
-│   └── profile/                      # Profile update pipeline stages
+│   ├── __init__.py
+│   ├── base.py                       # Pipeline, Stage, PipelineContext, UsageAccumulator
+│   ├── triage_pipeline.py            # Triage pipeline (single + batch)
+│   ├── draft_pipeline.py             # Draft generation pipeline
+│   └── profile_pipeline.py           # Profile analysis pipeline
 │
-├── llm/
-│   ├── router.py                     # LLMRouter (LiteLLM wrapper)
-│   ├── circuit_breaker.py            # Circuit breaker for LLM calls
-│   └── cost_calculator.py            # Cost estimation from token usage
-│
-├── prompts/                          # Jinja2 templates (versioned)
-│   ├── triage/
-│   ├── draft/
-│   └── profile/
-│
-├── tasks/                            # Celery task definitions
-│   ├── triage_tasks.py
-│   ├── draft_tasks.py
-│   └── profile_tasks.py
-│
-├── repositories/                     # DB access (SQLAlchemy Core)
-│   ├── thread_repo.py
-│   ├── draft_repo.py
-│   ├── triage_repo.py
-│   ├── profile_repo.py
-│   └── usage_repo.py
-│
-└── shared/
-    ├── logging.py                    # structlog configuration
-    └── events.py                     # Redis pub/sub event publisher
+└── tasks/                            # Celery task definitions
+    ├── __init__.py
+    ├── triage_tasks.py               # ai.triage.classify, ai.triage.classify_batch
+    ├── draft_tasks.py                # ai.draft.generate
+    └── profile_tasks.py              # ai.profile.build
 ```
+
+> **Note:** The implementation uses a flat pipeline structure (one file per pipeline) rather than subdirectories. DB access is done inline within pipeline stages using SQLAlchemy ORM, not through separate repository classes. Prompt management uses a `PromptManager` class with Redis caching and DB fallback rather than Jinja2 template files.
 
 ---
 
@@ -128,147 +120,253 @@ Single-step operations (health check, simple DB write). Don't pipeline trivial w
 
 ## Triage Pipeline
 
+The triage pipeline supports both single-thread and batch classification modes.
+
+### Single-Thread Pipeline
+
 ```
-LoadThreadContext → HeuristicClassification → (LLMClassification) → StoreResult → EnqueueDraftIfNeeded
+LoadThreadStage → CheckUserRepliedStage → CheckDraftInProgressStage → LLMTriageStage → SaveTriageResultStage
+```
+
+### Batch Pipeline (primary mode, triggered after sync)
+
+```
+LoadBatchThreadsStage → BatchLLMTriageStage → SaveBatchTriageResultsStage
 ```
 
 ### Stages
 
-**1. LoadThreadContextStage** — Reads thread + messages from DB. Extracts: subject, from, to, cc, body preview, thread length.
+**1. LoadThreadStage** — Reads thread + ALL messages from DB (including native Gmail drafts), ordered chronologically. The full message list is passed downstream so heuristic stages can inspect draft presence.
 
-**2. HeuristicClassificationStage** — Fast rules, no LLM call:
-- User in `To` + message has `?` → likely `reply_needed`
-- Sender matches `noreply@`, `notifications@` → `notification_or_subscription`
-- User only in `Cc` → `cc_or_bulk_low_priority`
-- No clear question or action → `informational_no_action`
-- If confidence ≥ 0.8, mark `should_stop = True` (skip LLM).
+**2. CheckUserRepliedStage** — Detects if the user has already **sent** a reply after the last incoming message addressed to them. Multi-party thread aware: only considers messages where the user is in the `To` field and where `is_sent_by_user = True` and `is_draft = False`. If the user's last sent reply is newer than the last incoming message to them, classifies as `already_replied` (confidence 1.0, `skip_llm = True`).
 
-**3. LLMClassificationStage** — Only runs if heuristic confidence < 0.8. Calls OpenRouter/Gemini with triage prompt. Returns structured JSON classification.
+**3. CheckDraftInProgressStage (NEW)** — Runs only if `skip_llm` is not already set. Checks if any message in the thread has `is_draft = True`. If found, classifies as `draft_in_progress` (confidence 1.0, method=heuristic, `skip_llm = True`). **Zero LLM tokens consumed.**
 
-**4. StoreTriageResultStage** — Writes result to `triage_results` table. Records method (`heuristic`, `llm`, `hybrid`).
+**4. LLMTriageStage** — Heuristic pre-filter first: if the latest non-draft sender matches `no-reply` patterns → `info` (no LLM call). Otherwise calls LLM with structured output (Pydantic `TriageResponse`). **Native Gmail drafts are filtered out of the prompt** so the LLM never sees unsent text. Custom instructions from `user_preferences` are appended to the system prompt.
 
-**5. EnqueueDraftIfNeededStage** — If `reply_needed`, enqueues a draft generation Celery task.
+**5. SaveTriageResultStage** — Upserts result to `triage_results` table using **`ON CONFLICT DO UPDATE`** (allows re-classification on manual re-triage). Records LLM metadata (model, tokens, cost).
 
-### Cost impact of hybrid triage
-At 1000 users, ~3000 triage jobs/hour. If 60% resolve via heuristic, we save ~1800 LLM calls/hour. At ~$0.001/call, that's ~$1.80/hour saved. Over a month: ~$1300 saved.
+**6. BatchLLMTriageStage** — Processes multiple threads in a single LLM call. Applies heuristic pre-filters in order (no-reply → already-replied → draft-in-progress), then sends remaining threads to the LLM in one batched call. Native draft messages are excluded from the prompt for LLM candidate threads.
+
+**7. SaveBatchTriageResultsStage** — Bulk-inserts all batch triage results with **`ON CONFLICT DO UPDATE`** for idempotency.
+
+### Triage Categories (from `triage_categories.json`)
+
+Categories are externalized to a JSON config file, not hardcoded:
+- `reply_needed` — Requires a response from the user
+- `already_replied` — User has already **sent** a reply after the last incoming message
+- `draft_in_progress` — A native Gmail draft exists in the thread; reply not yet sent (**heuristic only, no LLM call**)
+- `promotions` — Marketing, newsletters, deals
+- `info` — Informational notifications, no response needed
+- `junk` — Spam or irrelevant content
+- Default fallback: `info`
+
+### Custom Instructions
+
+Users can set custom triage rules via `PUT /api/v1/preferences/triage` (max 500 chars). These are stored in the `user_preferences` table with key `triage_settings`. During triage, the pipeline loads these instructions and appends them to the LLM system prompt:
+
+```
+Additional user-specific rules:
+{custom_instructions}
+```
+
+This allows users to override default classification behavior for specific senders or patterns.
+
+### Batch Optimization
+
+After Gmail sync, unclassified threads are dispatched in batches (configurable via `TRIAGE_BATCH_SIZE`, default 25). This reduces LLM calls significantly — one call classifies up to 25 threads instead of 25 separate calls.
+
+### Multi-party Thread Classification
+
+The heuristic reply-check in `CheckUserRepliedStage` is designed to handle multi-person email threads correctly:
+- It tracks **incoming messages addressed to the user** (the user appears in `To`) separately from all incoming messages.
+- It uses timestamps to determine if the user's last sent message is more recent than the last incoming message that was addressed to them.
+- In a chain `A→user→A→B (addressing user)`, B's message is the `last_incoming_to_user`. The user's last reply predates B's message, so `skip_llm` is NOT set. The thread goes to the LLM which correctly classifies it as `reply_needed`.
 
 ---
 
 ## Draft Generation Pipeline
 
 ```
-LoadContext → LoadProfile → AssemblePrompt → (SummarizeIfLong) → GenerateDraft → ValidateDraft → StoreDraft → NotifyReady → RecordUsage
+LoadThreadHistory → LoadUserProfile → FormatContext → LLMDraftGeneration → SaveDraft
 ```
 
 ### Stages
 
-**1. LoadThreadContextStage** — Reused from triage pipeline.
+**1. LoadThreadHistoryStage** — Loads all **non-draft** messages for the thread (`is_draft = False`), ordered chronologically. Also loads the user's email address for context labeling. Native Gmail drafts are excluded so the LLM generates a fresh reply without repeating in-progress work.
 
-**2. LoadUserProfileStage** — Reads profile (tone, greeting, closing, priorities) + preferences (signature) from DB.
+**2. LoadUserProfileStage** — Reads the user's personalized communication profile from `user_profiles` table.
 
-**3. AssemblePromptStage** — Builds the structured LLM prompt using Jinja2 template. Injects: thread context, profile, signature, constraints.
+**3. FormatContextStage** — Formats messages into a readable chronological context block for the LLM. Labels user-sent messages as `[YOU replied]` to help the LLM understand conversation flow. Truncates to last 6000 characters for extremely long threads. Builds persona context from user profile (tone, greeting/closing style, communication norms, signature).
 
-**4. SummarizeThreadIfLongStage** — If thread > 10 messages or > 4000 tokens, summarize first. Reduces input tokens, saves cost.
+**4. LLMDraftGenerationStage** — Calls LLM via `PromptManager` to load the draft prompt template (`draft_v1`), then generates the reply using thread context and user profile. **Handles `[NO_REPLY_NEEDED]` response:** if the LLM determines no reply is appropriate, sets `ctx.data["no_reply_needed"] = True` and `ctx.should_stop = True` to skip the save stage.
 
-**5. GenerateDraftStage** — Calls LLM via LiteLLM. Returns draft content.
+**5. SaveDraftStage** — Writes to `drafts` table with status `generated`, stores generation metadata (model, tokens, cost). Uses upsert logic: if an existing draft exists for the thread, updates it in place (no versioning). Otherwise creates a new draft.
 
-**6. ValidateDraftStage** — Checks: non-empty response, no obvious hallucinations (mentions things not in thread), reasonable length, contains signature if configured.
+After storage, the task publishes a `draft:ready` event via Redis pub/sub for real-time WebSocket notification.
 
-**7. StoreDraftStage** — Writes to `drafts` table with status `draft_ready`, generation metadata (model, tokens, cost).
+### Metadata-First Sync Impact on Draft Pipeline
 
-**8. NotifyDraftReadyStage** — Publishes `draft:ready` event to Redis pub/sub. Node Gateway picks this up and pushes via WebSocket.
+Because sync uses `format: 'metadata'` (no body fetched), the gateway ensures full body content is available before dispatching draft generation:
 
-**9. RecordUsageStage** — Writes to `usage_records` table: tokens used, model, estimated cost.
+1. **Manual draft trigger** (`POST /connections/:type/threads/:id/draft`): Gateway checks if messages have body content. If not, calls `GmailAdapter.fetchThreadFull()` to fetch and cache bodies, then dispatches the Celery task.
+2. **Draft regeneration** (`POST /connections/:type/threads/:id/regenerate`): Same body-fetch-first pattern.
+3. **Profile pipeline**: Sent email bodies are fetched before profile build dispatch to ensure the LLM has actual email content to analyze.
 
 ---
 
 ## Profile Update Pipeline
 
 ```
-LoadApprovedDraft → LoadCurrentProfile → EvaluateUpdate → ApplyBoundedUpdate → RecordUsage
+LoadSentEmails → FormatSentEmails → LLMProfileGeneration → SaveProfile
 ```
 
-Triggered asynchronously after a draft is approved and sent. Low priority.
+Triggered after first Gmail sync (if profile hasn't been calibrated) or on-demand.
 
-**EvaluateUpdateStage** — Asks LLM: "Given this approved reply and the current profile, should anything change?" Expected response: `no_change` or a structured patch (e.g., `{ "closing_style": "Best regards" }`).
+**1. LoadSentEmailsStage** — Loads the last 20 emails sent by the user (joins through `user_connections` → `email_threads` → `email_messages` where `is_sent_by_user = True`). If no sent emails found, marks as cold start.
 
-**ApplyBoundedUpdateStage** — Only accepts bounded, structured fields. No free-text dumps. Increments `profile_version`. Profiles don't grow unbounded.
+**2. FormatSentEmailsStage** — Formats sent messages into analysis blocks (subject + body). Filters out emails with fewer than 5 words. If no valid text remains, falls back to cold start.
+
+**3. LLMProfileGenerationStage** — For cold starts, applies a professional default profile (greeting style, closing style, tone, communication norms, confidence 0.5). For users with sent emails, calls LLM to analyze writing style and extract structured profile data using `ProfileResponse` Pydantic model.
+
+**4. SaveProfileStage** — Upserts profile to `user_profiles` table using `ON CONFLICT DO UPDATE`. Increments `profile_version` on updates. Sets `last_calibrated_at` only for non-cold-start profiles.
+
+### Profile Bootstrap on Gmail Connection
+
+When a user first connects Gmail, the gateway creates a default profile immediately (without waiting for LLM analysis):
+- `preferred_tone`: "professional"
+- `personalized_profile`: Default professional writing guidelines
+- `signature_template`: User's name
+- Default greeting/closing styles
+
+The full LLM-based profile calibration runs asynchronously after the initial sync completes.
 
 ---
 
-## LLM Router
+## LLM Service
 
 ```python
-class LLMRouter:
-    primary_model: str     # "gemini/gemini-2.0-flash" or "openrouter/google/gemini-2.0-flash"
-    fallback_model: str    # "gemini/gemini-1.5-flash" (free tier)
-    circuit_breaker: CircuitBreaker  # Open after 5 failures, recover after 60s
+class LLMService:
+    primary_model: str     # "gemini/gemini-2.0-flash" (from LLM_PRIMARY_MODEL env)
+    fallback_model: str    # "gemini/gemini-1.5-flash" (from LLM_FALLBACK_MODEL env)
 ```
 
 **Provider compatibility:**
 - **Gemini** (direct, free tier): For development and as fallback. Model string: `gemini/gemini-2.0-flash`
 - **OpenRouter**: When API key is available. Model string: `openrouter/google/gemini-2.0-flash`
+- **OpenAI-compatible**: Supports custom `OPENAI_API_KEY` + `OPENAI_BASE_URL` for any OpenAI-compatible provider
 - LiteLLM handles routing to the correct provider based on model string prefix.
 
-**Circuit breaker:**
-- Tracks failures per model
-- After 5 consecutive failures → circuit opens → all calls go to fallback model
-- After 60s → circuit half-opens → one probe request
-- If probe succeeds → circuit closes → normal operation
+**Fallback strategy:**
+- Primary model fails → try fallback model
+- Fallback model fails → mock fallback (returns safe default responses with zero cost)
+- Mock fallback for triage returns `reply_needed` with 0.9 confidence
+- Mock fallback for drafts returns an error message explaining LLM unavailability
+
+**Methods:**
+- `generate(system_prompt, user_prompt)` — Unstructured text generation (used for drafts)
+- `generate_structured(system_prompt, user_prompt, response_format)` — Structured JSON output using Pydantic models (used for triage and profile)
 
 **Cost calculation:**
-- OpenRouter returns cost in response headers
-- Gemini free tier: $0 (rate-limited to 15 RPM / 1M tokens/day)
-- We store estimated cost per request for billing dashboard
+- LiteLLM's `cost_calculator.completion_cost()` computes cost from response metadata
+- If cost calculation fails, defaults to $0.00
+- Metrics (model, input_tokens, output_tokens, cost) returned with every call
+
+> **Note:** The documented circuit breaker pattern is not yet implemented. The current fallback strategy (primary → fallback → mock) provides resilience without formal circuit breaker state tracking.
 
 ---
 
 ## Celery Task Configuration
 
 ```python
-# Triage task
+# Triage task (single thread)
 @celery_app.task(
     name='ai.triage.classify',
     queue='triage-queue',
     max_retries=2,
-    default_retry_delay=2,
-    acks_late=True,                  # Don't ack until task completes
-    reject_on_worker_lost=True,      # Re-queue if worker crashes
-    time_limit=30,                   # Hard kill at 30s
-    soft_time_limit=25,              # SoftTimeLimitExceeded at 25s
+    default_retry_delay=5,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    time_limit=60,
+    soft_time_limit=50,
+)
+
+# Batch triage task (multiple threads in one LLM call)
+@celery_app.task(
+    name='ai.triage.classify_batch',
+    queue='triage-queue',
+    max_retries=2,
+    default_retry_delay=5,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    time_limit=120,
+    soft_time_limit=100,
 )
 
 # Draft task
 @celery_app.task(
     name='ai.draft.generate',
     queue='draft-queue',
-    max_retries=3,
+    max_retries=2,
     default_retry_delay=10,
     acks_late=True,
     reject_on_worker_lost=True,
-    time_limit=60,                   # Drafts can take longer (LLM latency)
-    soft_time_limit=50,
-    rate_limit='30/m',               # Max 30 drafts/minute
+    time_limit=90,
+    soft_time_limit=75,
 )
 
-# Profile task
+# Profile build task
 @celery_app.task(
-    name='ai.profile.update',
+    name='ai.profile.build',
     queue='profile-queue',
     max_retries=2,
     default_retry_delay=5,
     acks_late=True,
-    time_limit=30,
-    rate_limit='10/m',
+    reject_on_worker_lost=True,
+    time_limit=60,
+    soft_time_limit=50,
 )
 ```
+
+### Task Flow
+
+- After Gmail sync completes, unclassified threads are dispatched as batch triage tasks
+- After triage classifies a thread as `reply_needed`, a draft generation task is automatically enqueued
+- After first Gmail connection (if profile not calibrated), a profile build task is dispatched
+- All tasks reset DB engine and Redis connections on each invocation to avoid stale connections in forked Celery workers
+
+---
+
+## Cloud Run Deployment & Wakeup Architecture
+
+The AI Engine is deployed to Google Cloud Run with a **CPU Always Allocated + `min-instances=0`** model:
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `--no-cpu-throttling` | enabled | Celery background tasks need full CPU; throttled instances receive `SIGKILL` |
+| `--min-instances` | `0` | Container spins down to zero when idle; no cost when no work is queued |
+| `--max-instances` | `2` | Prevents cost overrun on traffic spikes |
+
+### Wakeup Ping Protocol
+
+Because `min-instances=0` means the container may be frozen, the Gateway's `CeleryBridge` sends a lightweight `GET /ping` to the AI Engine's FastAPI server immediately after enqueuing each Redis task. This wakes the container before Celery starts processing the job:
+
+```
+Gateway: LPUSH job → Redis → (async) GET /ping → AI Engine FastAPI
+                                                        ↓
+                                              Container boots in ~2s
+                                                        ↓
+                                              Celery worker processes job
+```
+
+The ping uses a fire-and-forget retry loop (up to 3 attempts, 500ms apart). Failures are logged as warnings and do not block job dispatch — the Celery retry mechanism handles any worker-not-ready cases.
 
 ---
 
 ## Implementation Priority
 
 1. Celery app + Redis broker config
-2. FastAPI health endpoint
+2. FastAPI health endpoint + `/ping` wakeup endpoint
 3. SQLAlchemy async engine + session
 4. Pipeline framework (base classes)
 5. LLMRouter (LiteLLM + Gemini)

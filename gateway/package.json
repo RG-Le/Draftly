@@ -12,9 +12,9 @@
     "test": "jest --config jest.config.ts",
     "test:integration": "jest --config jest.integration.config.ts",
     "lint": "eslint src/",
-    "migrate": "knex --knexfile src/infrastructure/database/knexfile.ts migrate:latest",
-    "migrate:rollback": "knex --knexfile src/infrastructure/database/knexfile.ts migrate:rollback",
-    "migrate:make": "knex --knexfile src/infrastructure/database/knexfile.ts migrate:make",
+    "migrate": "tsx node_modules/knex/bin/cli.js --knexfile src/infrastructure/database/knexfile.ts migrate:latest",
+    "migrate:rollback": "tsx node_modules/knex/bin/cli.js --knexfile src/infrastructure/database/knexfile.ts migrate:rollback",
+    "migrate:make": "tsx node_modules/knex/bin/cli.js --knexfile src/infrastructure/database/knexfile.ts migrate:make",
     "generate:keys": "node scripts/generate-keys.mjs"
   },
   "dependencies": {

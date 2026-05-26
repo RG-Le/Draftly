@@ -10,6 +10,7 @@ logger = structlog.get_logger()
 
 # We need to drop unknown kwargs if litellm doesn't support them for a provider
 litellm.drop_params = True
+litellm.ssl_verify = False  # Handle environments with SSL interception (corporate proxies, Docker)
 
 class LLMService:
     def __init__(self):
@@ -40,20 +41,20 @@ class LLMService:
         
         return await self._execute_with_fallback(messages)
 
-    async def generate_structured(self, system_prompt: str, user_prompt: str, response_format: type[BaseModel]) -> tuple[str, dict[str, Any]]:
+    async def generate_structured(self, system_prompt: str, user_prompt: str, response_format: type[BaseModel], max_tokens: int = 1000) -> tuple[str, dict[str, Any]]:
         """Generate a structured JSON response."""
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
-        return await self._execute_with_fallback(messages, response_format=response_format)
 
-    async def _execute_with_fallback(self, messages: list[dict], response_format: type[BaseModel] | None = None) -> tuple[str, dict[str, Any]]:
+        return await self._execute_with_fallback(messages, response_format=response_format, max_tokens=max_tokens)
+
+    async def _execute_with_fallback(self, messages: list[dict], response_format: type[BaseModel] | None = None, max_tokens: int = 1000) -> tuple[str, dict[str, Any]]:
         kwargs = {
             "messages": messages,
-            "temperature": 0.2, # Low temperature for accurate triage/draft tone
-            "max_tokens": 1000
+            "temperature": 0.2,
+            "max_tokens": max_tokens
         }
         
         if response_format:
@@ -62,11 +63,15 @@ class LLMService:
         try:
             return await self._call_model(self.primary_model, kwargs)
         except Exception as e:
+            if type(e).__name__ == "SoftTimeLimitExceeded":
+                raise e
             print(f"\n[DEBUG] Primary model ({self.primary_model}) failed: {e}")
             logger.warning("llm.primary_model_failed", error=str(e), fallback=self.fallback_model)
             try:
                 return await self._call_model(self.fallback_model, kwargs)
             except Exception as fallback_err:
+                if type(fallback_err).__name__ == "SoftTimeLimitExceeded":
+                    raise fallback_err
                 logger.error("llm.fallback_model_failed", error=str(fallback_err))
                 # Trigger mock fallback if both fail
                 return await self._mock_fallback(response_format)
@@ -79,7 +84,8 @@ class LLMService:
             "model": "mock_fallback",
             "input_tokens": 0,
             "output_tokens": 0,
-            "cost": 0.0
+            "cost": 0.0,
+            "latency_ms": 0
         }
         
         if response_format:
@@ -90,6 +96,10 @@ class LLMService:
                     "classification": "reply_needed", 
                     "confidence": 0.9, 
                     "reasoning": "Mocked LLM due to permissions"
+                })
+            elif response_format.__name__ == 'BatchTriageResponse':
+                mock_content = json.dumps({
+                    "results": [{"thread_index": 0, "classification": "reply_needed", "confidence": 0.5, "reasoning": "Mock fallback"}]
                 })
             else:
                 mock_content = json.dumps({}) # Catch all for other models

@@ -1,87 +1,4 @@
 services:
-  # ===== Node.js Gateway (Disabled for Local Dev) =====
-  # gateway:
-  #   build:
-  #     context: ./gateway
-  #     dockerfile: Dockerfile
-  #     target: development
-  #   ports:
-  #     - "3000:3000"
-  #   env_file: .env
-  #   environment:
-  #     - NODE_ENV=development
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   volumes:
-  #     - ./gateway/src:/app/src
-  #     - ./gateway/keys:/app/keys
-  #   restart: unless-stopped
-
-  # ===== Python AI Engine — Celery Workers (Disabled for Local Dev) =====
-  # ai-engine-worker:
-  #   build:
-  #     context: ./ai-engine
-  #     dockerfile: Dockerfile
-  #   command: >
-  #     celery -A src.celery_app worker
-  #     --loglevel=info
-  #     --concurrency=4
-  #     --queues=triage-queue,draft-queue,profile-queue
-  #   env_file: .env
-  #   environment:
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   volumes:
-  #     - ./ai-engine/src:/app/src
-  #   restart: unless-stopped
-
-  # ===== Python AI Engine — FastAPI (health/admin) (Disabled for Local Dev) =====
-  # ai-engine-api:
-  #   build:
-  #     context: ./ai-engine
-  #     dockerfile: Dockerfile
-  #   command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-  #   ports:
-  #     - "8000:8000"
-  #   env_file: .env
-  #   environment:
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   volumes:
-  #     - ./ai-engine/src:/app/src
-  #   restart: unless-stopped
-
-  # ===== Celery Beat — Scheduled Tasks (Disabled for Local Dev) =====
-  # celery-beat:
-  #   build:
-  #     context: ./ai-engine
-  #     dockerfile: Dockerfile
-  #   command: celery -A src.celery_app beat --loglevel=info
-  #   env_file: .env
-  #   environment:
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #   volumes:
-  #     - ./ai-engine/src:/app/src
-  #   restart: unless-stopped
 
   # ===== PostgreSQL 16 =====
   postgres:
@@ -91,17 +8,17 @@ services:
       POSTGRES_USER: draftly
       POSTGRES_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U draftly -d draftly"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
 
-  # ===== PgBouncer =====
+  # ===== PgBouncer — Connection Pooler =====
   pgbouncer:
     image: edoburu/pgbouncer:latest
     environment:
@@ -112,7 +29,7 @@ services:
       POOL_MODE: transaction
       AUTH_TYPE: plain
     ports:
-      - "6432:6432"
+      - "127.0.0.1:6432:6432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,7 +39,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: >
       redis-server
       --maxmemory 512mb
@@ -135,7 +52,165 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
+
+  # ===== DB Migrations (one-shot, runs before gateway/workers start) =====
+  # Uses the gateway image (base stage) to run knex migrations directly
+  # against PostgreSQL on port 5432 (bypassing PgBouncer — required for DDL).
+  migrate:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+      target: base
+    command: npm run migrate
+    env_file: .env
+    environment:
+      # Override .env so migrations hit postgres container directly (DDL must bypass PgBouncer)
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: draftly
+      DB_USER: draftly
+      DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ===== Node.js Gateway — REST API, WebSocket, OAuth, BullMQ =====
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file: .env
+    environment:
+      NODE_ENV: development
+      # Override .env localhost values to hit Docker service names
+      DB_HOST: pgbouncer
+      DB_PORT: "6432"
+      DB_NAME: draftly
+      DB_USER: draftly
+      DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+      REDIS_URL: redis://redis:6379
+      AI_WORKER_URL: http://ai-engine-api:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./gateway/src:/app/src
+      - ./gateway/keys:/app/keys
+    restart: unless-stopped
+
+  # ===== Python AI Engine — Celery Workers =====
+  # Handles: triage-queue, draft-queue, profile-queue
+  # Connects directly to PostgreSQL (not PgBouncer) — uses NullPool per task
+  ai-engine-worker:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    command: >
+      celery -A src.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=triage-queue,draft-queue,profile-queue
+    env_file: .env
+    environment:
+      # Override .env localhost values to hit Docker service names
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: draftly
+      DB_USER: draftly
+      DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./ai-engine/src:/app/src
+    restart: unless-stopped
+
+  # ===== Python AI Engine — FastAPI (health + liveness) =====
+  ai-engine-api:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: draftly
+      DB_USER: draftly
+      DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./ai-engine/src:/app/src
+    restart: unless-stopped
+
+  # ===== Celery Beat — Scheduled Tasks =====
+  celery-beat:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+    command: celery -A src.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: draftly
+      DB_USER: draftly
+      DB_PASSWORD: ${DB_PASSWORD:-draftly_dev_password}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./ai-engine/src:/app/src
+    restart: unless-stopped
+
+  # ===== React Frontend — Vite Dev Server =====
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      VITE_API_BASE_URL: http://localhost:3000
+    # Mount source for hot-module-reload
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+    depends_on:
+      - gateway
     restart: unless-stopped
 
 volumes:

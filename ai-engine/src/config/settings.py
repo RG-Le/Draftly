@@ -8,14 +8,17 @@ class Settings(BaseSettings):
     """All configuration from environment. Validated at startup."""
 
     # Database (direct PG, not PgBouncer — Celery workers need persistent connections)
-    db_host: str = Field(default="postgres", alias="DB_HOST")
-    db_port: int = Field(default=5432)
+    db_host: str = Field(default="localhost", alias="DB_HOST")
+    db_port: int = Field(default=5432, alias="DB_PORT")
     db_name: str = Field(default="draftly", alias="DB_NAME")
     db_user: str = Field(default="draftly", alias="DB_USER")
     db_password: str = Field(alias="DB_PASSWORD")
+    db_ssl: bool = Field(default=False, alias="DB_SSL")
+    db_ssl_reject_unauthorized: bool = Field(default=True, alias="DB_SSL_REJECT_UNAUTHORIZED")
+    db_ssl_ca: str | None = Field(default=None, alias="DB_SSL_CA")
 
     # Redis
-    redis_url: str = Field(default="redis://redis:6379", alias="REDIS_URL")
+    redis_url: str = Field(default="redis://127.0.0.1:6379", alias="REDIS_URL")
 
     # LLM
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
@@ -29,13 +32,20 @@ class Settings(BaseSettings):
     llm_budget_hourly_tokens: int = Field(default=50000, alias="LLM_BUDGET_HOURLY_TOKENS")
     llm_budget_daily_tokens: int = Field(default=200000, alias="LLM_BUDGET_DAILY_TOKENS")
 
+    # Triage
+    triage_batch_size: int = Field(default=25, alias="TRIAGE_BATCH_SIZE")
+
     @property
     def database_url(self) -> str:
-        return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        from urllib.parse import quote_plus
+        encoded_password = quote_plus(self.db_password)
+        return f"postgresql+asyncpg://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     @property
     def database_url_sync(self) -> str:
-        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        from urllib.parse import quote_plus
+        encoded_password = quote_plus(self.db_password)
+        return f"postgresql://{self.db_user}:{encoded_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     model_config = {
         "env_file": [".env", "../.env"],

@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 venv/
 .claude
-
+.kiro
 # Build output
 dist/
 *.egg-info/
@@ -18,6 +18,9 @@ dist/
 
 # Keys (generated, not committed)
 keys/
+
+# workflows (for now)
+.github/
 
 # IDE
 .vscode/

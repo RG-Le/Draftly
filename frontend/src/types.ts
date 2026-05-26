@@ -131,6 +131,14 @@ export interface ProfileData {
   profileVersion?: number;
   confidenceScore?: number;
   lastCalibratedAt?: string | null;
+  profileSource?: 'ai_generated' | 'default' | 'manual' | string;
+  isAiGenerated?: boolean;
+}
+
+export interface TriageBannerState {
+  type: 'retrying' | 'failed';
+  message: string;
+  permanent?: boolean;
 }
 
 export interface UserPreference {
@@ -142,4 +150,26 @@ export interface AuthSession {
   user: User;
   accessToken: string;
   refreshToken: string;
+}
+
+export interface AutoSyncPreference {
+  enabled: boolean;
+  intervalHours: number;
+  lastSyncAt?: string | null;
+  gmailConnected?: boolean;
+}
+
+export interface UsageStats {
+  period: string;
+  emailsSynced: number;
+  emailsClassified: number;
+  heuristicClassified: number;
+  llmClassified: number;
+  triageBreakdown: Record<string, number>;
+  draftsGenerated: number;
+  draftsApproved: number;
+  draftsSent: number;
+  totalLlmCostUsd: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
 }

@@ -25,7 +25,8 @@ export function useRealtimeEvents(enabled = true) {
     markSyncStarted,
     markTriageCompleted,
     markTriageFailed,
-    markTriageStarted
+    markTriageStarted,
+    setTriageBanner
   } = usePipelineStatus();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
@@ -50,11 +51,24 @@ export function useRealtimeEvents(enabled = true) {
       },
       'sync:completed': (payload) => {
         markSyncCompleted();
-        notify(
-          'Sync completed',
-          `Updated ${payload?.updatedThreads ?? 0} threads and found ${payload?.newThreads ?? 0} new threads.`,
-          'success'
-        );
+        const newThreads = payload?.newThreads ?? 0;
+        const updatedThreads = payload?.updatedThreads ?? 0;
+        if (newThreads === 0 && updatedThreads === 0) {
+          notify(
+            'No new emails',
+            'No emails found in the selected time range. Try syncing with more days.',
+            'warning'
+          );
+        } else {
+          const parts = [];
+          if (newThreads > 0) parts.push(`${newThreads} new email${newThreads !== 1 ? 's' : ''}`);
+          if (updatedThreads > 0) parts.push(`${updatedThreads} updated`);
+          notify(
+            `Sync complete — ${parts.join(', ')}`,
+            'Triage classification will begin automatically.',
+            'success'
+          );
+        }
         invalidateCoreQueries(queryClient);
       },
       'sync:failed': (payload) => {
@@ -136,6 +150,60 @@ export function useRealtimeEvents(enabled = true) {
       'connection:expired': () => {
         notify('Connection expired', 'Reconnect Gmail to continue syncing and sending.', 'warning');
         invalidateCoreQueries(queryClient);
+      },
+      'profile:initialized': () => {
+        queryClient.invalidateQueries({ queryKey: ['profile'] });
+      },
+      'triage:batch_started': (payload) => {
+        notify(
+          'Batch triage started',
+          `Classifying ${payload?.threadCount ?? 'multiple'} threads.`,
+          'info'
+        );
+      },
+      'triage:batch_completed': (payload) => {
+        setTriageBanner(null);
+        const results: Array<{ threadId: string; classification: string }> = payload?.results || [];
+        if (results.length > 0) {
+          const classMap = new Map(results.map((r) => [r.threadId, r.classification]));
+          queryClient.setQueriesData<any>({ queryKey: ['threads'] }, (existing: any) => {
+            if (!existing?.threads) return existing;
+            return {
+              ...existing,
+              threads: existing.threads.map((t: any) => {
+                const newClass = classMap.get(t.id);
+                if (!newClass) return t;
+                return { ...t, triage: { ...(t.triage || {}), classification: newClass } };
+              })
+            };
+          });
+          results.forEach((r) => {
+            queryClient.invalidateQueries({ queryKey: ['thread-detail', r.threadId] });
+          });
+        }
+      },
+      'triage:batch_retrying': (payload) => {
+        const { attempt, maxAttempts, retryInSeconds } = payload || {};
+        setTriageBanner({
+          type: 'retrying',
+          message: `Classifying emails… attempt ${attempt ?? '?'}/${maxAttempts ?? '?'}, retrying in ${retryInSeconds ?? '?'}s`
+        });
+      },
+      'triage:batch_failed': (payload) => {
+        if (payload?.permanent) {
+          const count = payload?.threadCount;
+          setTriageBanner({
+            type: 'failed',
+            message: `Email classification failed.${count ? ` ${count} thread(s) affected.` : ''}`,
+            permanent: true
+          });
+        } else {
+          notify('Batch triage failed', payload?.error || 'Could not classify threads.', 'danger');
+        }
+      },
+      'profile_generated': () => {
+        queryClient.invalidateQueries({ queryKey: ['profile'] });
+        notify('Profile updated!', 'Your writing profile has been regenerated.', 'success');
       }
     };
 
@@ -174,6 +242,7 @@ export function useRealtimeEvents(enabled = true) {
     markSyncStarted,
     markTriageCompleted,
     markTriageFailed,
-    markTriageStarted
+    markTriageStarted,
+    setTriageBanner
   ]);
 }

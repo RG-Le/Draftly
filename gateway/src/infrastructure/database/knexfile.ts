@@ -13,8 +13,9 @@ const config: Knex.Config = {
   client: 'pg',
   connection: {
     // DDL operations must bypass PgBouncer (which is in transaction pooling mode).
-    // If DB_HOST is 'pgbouncer' (from .env), we override to 'localhost' to hit PG directly on 5432.
-    host: process.env.DB_HOST === 'pgbouncer' ? 'localhost' : process.env.DB_HOST || 'localhost',
+    // In Docker: DB_HOST=pgbouncer → use 'postgres' container directly on 5432
+    // Locally: DB_HOST=localhost → use localhost:5432 directly
+    host: process.env.DB_HOST === 'pgbouncer' ? (process.env.DB_MIGRATION_HOST || 'postgres') : process.env.DB_HOST || 'localhost',
     port: 5432,
     database: process.env.DB_NAME || 'draftly',
     user: process.env.DB_USER || 'draftly',

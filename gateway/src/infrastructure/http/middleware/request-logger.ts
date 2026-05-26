@@ -2,13 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import { logger } from '../../../shared/logger.js';
 import { getCorrelationId } from './correlation.js';
 
-/**
- * Logs every request with correlation ID, method, path, and response time.
- * PII is never logged — see logger redact config.
- */
 export function requestLoggerMiddleware(req: Request, res: Response, next: NextFunction): void {
   const start = Date.now();
   const correlationId = getCorrelationId(req);
+
+  // Log on arrival — before auth runs so userId won't be set yet
+  logger.debug(
+    { correlationId, method: req.method, url: req.originalUrl },
+    'request.received',
+  );
 
   res.on('finish', () => {
     const duration = Date.now() - start;
@@ -16,10 +18,11 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
       correlationId,
       method: req.method,
       path: req.path,
+      url: req.originalUrl,
       statusCode: res.statusCode,
-      responseTime: duration,
-      userAgent: req.get('User-Agent'),
-      userId: (req as any).userId || undefined,
+      responseTimeMs: duration,
+      userId: (req as any).userId || (req as any).user?.id || undefined,
+      ip: req.ip,
     };
 
     if (res.statusCode >= 500) {

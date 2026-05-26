@@ -279,6 +279,13 @@ export async function getThreadDetail(threadId: string): Promise<ThreadDetail> {
         ? toDraft(legacyDraftPayload.value?.draft || legacyDraftPayload.value, threadId)
         : null;
 
+    const fromPayload = payloadDraft ? toDraft(payloadDraft, threadId) : null;
+    // Prefer the payload draft when it has actual content; fall back to the legacy draft otherwise.
+    const draft =
+      (fromPayload?.currentContent || fromPayload?.generatedContent)
+        ? fromPayload
+        : (legacyDraft ?? fromPayload);
+
     return {
       thread: toThreadSummary(payload.thread),
       messages: (payload.messages || []).map(toMessage),
@@ -290,7 +297,7 @@ export async function getThreadDetail(threadId: string): Promise<ThreadDetail> {
             reasoning: payload.triage.reasoning ?? null
           }
         : legacyTriage,
-      draft: payloadDraft ? toDraft(payloadDraft, threadId) : legacyDraft
+      draft
     };
   } catch (error) {
     if (!(error instanceof ApiError) || (error.status !== 404 && error.status !== 405)) {
